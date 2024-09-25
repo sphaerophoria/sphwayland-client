@@ -22,17 +22,11 @@ fn openWaylandConnection(alloc: Allocator) !std.net.Stream {
     return try std.net.connectUnixSocket(socket_path);
 }
 
-fn handleDisplayEvent(event: anytype) !void {
-    const parsed = try wlb.WlDisplay.Event.parse(event.header.op, event.data);
-    switch (parsed) {
-        .err => |err| {
-            std.log.err("wl_display::error: object {d}, code: {d}, msg: {s}", .{ err.object_id, err.code, err.message });
-        },
-        .delete_id => std.log.warn("Unimplemented handler for wl_display::delete_id", .{}),
-    }
+fn logWaylandErr(err: wlb.WlDisplay.Event.Error) void {
+    std.log.err("wl_display::error: object {d}, code: {d}, msg: {s}", .{ err.object_id, err.code, err.message });
 }
 
-fn createShmPool(alloc: Allocator, stream: std.net.Stream, wl_shm: wlb.WlShm, pixels: ShmPixelBuf, id: u32) !void {
+fn createShmPool(alloc: Allocator, stream: std.net.Stream, wl_shm: wlb.WlShm, shared_mem: SharedMem, id: u32) !void {
     // This has to be a comptime known value, but the alignment is kinda
     // defined by the C macros. We'll just use 8 and assume that it can't be
     // wrong
@@ -47,7 +41,7 @@ fn createShmPool(alloc: Allocator, stream: std.net.Stream, wl_shm: wlb.WlShm, pi
 
     cmsg.makeFdTransferCmsg(
         cmsg_buf.ptr,
-        @ptrCast(&pixels.fd),
+        @ptrCast(&shared_mem.fd),
         @sizeOf(std.posix.fd_t),
     );
 
@@ -56,7 +50,7 @@ fn createShmPool(alloc: Allocator, stream: std.net.Stream, wl_shm: wlb.WlShm, pi
     try wl_shm.createPool(wl_shm_buf.writer(), .{
         .id = id,
         .fd = {}, // Sent as cmsg attachment
-        .size = @intCast(pixels.size()),
+        .size = @intCast(shared_mem.size),
     });
 
     const iov = [1]std.posix.iovec_const{.{
@@ -95,6 +89,9 @@ fn logUnusedEvent(interface: InterfaceType, event: Event) !void {
         .wl_shm => {
             std.log.warn("Unused event: {any}", .{try wlb.WlShm.Event.parse(event.header.op, event.data)});
         },
+        .wl_callback => {
+            std.log.warn("Unused event: {any}", .{try wlb.WlCallback.Event.parse(event.header.op, event.data)});
+        },
         .wl_shm_pool => {
             std.log.warn("Unused wl_shm_pool event", .{});
         },
@@ -127,6 +124,7 @@ const InterfaceType = enum {
     wl_buffer,
     wl_shm,
     wl_shm_pool,
+    wl_callback,
     xdg_wm_base,
     xdg_surface,
     xdg_toplevel,
@@ -144,6 +142,7 @@ const InterfaceRegistry = struct {
     fn init(alloc: Allocator, registry: wlb.WlRegistry) !InterfaceRegistry {
         var elems = InterfaceMap.init(alloc);
 
+        try elems.put(1, .display);
         try elems.put(registry.id, .registry);
 
         return .{
@@ -193,6 +192,7 @@ const InterfaceRegistry = struct {
             xdgdb.ZxdgDecorationManagerV1 => .decoration_manager,
             xdgdb.ZxdgToplevelDecorationV1 => .top_level_decoration,
             wlb.WlSurface => .wl_surface,
+            wlb.WlCallback => .wl_callback,
             xdgsb.XdgSurface => .xdg_surface,
             xdgsb.XdgToplevel => .xdg_toplevel,
             wlb.WlBuffer => .wl_buffer,
@@ -226,7 +226,15 @@ fn bindInterfaces(stream: std.net.Stream, interfaces: *InterfaceRegistry) !Bound
         };
 
         switch (interface) {
-            .display => try handleDisplayEvent(event),
+            .display => {
+                const parsed = try wlb.WlDisplay.Event.parse(event.header.op, event.data);
+                switch (parsed) {
+                    .err => |err| logWaylandErr(err),
+                    .delete_id => {
+                        std.log.warn("Unexpected delete object in binding stage", .{});
+                    },
+                }
+            },
             .registry => {
                 const action = try wlb.WlRegistry.Event.parse(event.header.op, event.data);
                 switch (action) {
@@ -269,50 +277,147 @@ fn bindInterfaces(stream: std.net.Stream, interfaces: *InterfaceRegistry) !Bound
     };
 }
 
-const ShmPixelBuf = struct {
+const SharedMem = struct {
     fd: std.posix.fd_t,
-    width: u32,
-    pixels: []u32,
+    size: usize,
 
-    pub fn init() !ShmPixelBuf {
+    fn init(size: usize) !SharedMem {
         const shm_file = try std.posix.memfd_create("sphwayland-client-pixbuf", 0);
+        try std.posix.ftruncate(shm_file, size);
+        return .{
+            .fd = shm_file,
+            .size = size,
+        };
+    }
 
-        const buf_width = 640;
-        const buf_height = 480;
-        const buf_size = buf_width * buf_height * 4;
-        try std.posix.ftruncate(shm_file, buf_size);
-
+    fn map(self: SharedMem) ![]u8 {
         const map_flags = std.posix.system.MAP{ .TYPE = .SHARED };
-        const pixel_buf = try std.posix.mmap(
+        const buf = try std.posix.mmap(
             null,
-            buf_size,
+            self.size,
             std.posix.system.PROT.READ | std.posix.system.PROT.WRITE,
             map_flags,
-            shm_file,
+            self.fd,
             0,
         );
 
-        const pixels = std.mem.bytesAsSlice(u32, pixel_buf[0..buf_size]);
+        return buf;
+    }
+};
 
-        @memset(pixels, 0xff00ffff);
+const PixelBuf = struct {
+    pixels: []u32,
+    width: u32,
+
+    pub fn init(buf: []u8, width: usize, color: u32) PixelBuf {
+        const buf_aligned: []align(4) u8 = @alignCast(buf);
+        const pixels = std.mem.bytesAsSlice(u32, buf_aligned);
+
+        @memset(pixels, color);
 
         return .{
-            .fd = shm_file,
-            .width = buf_width,
+            .width = @intCast(width),
             .pixels = pixels,
         };
     }
 
-    fn height(self: ShmPixelBuf) usize {
+    fn height(self: PixelBuf) usize {
         return self.pixels.len / self.width;
     }
 
-    fn pitch(self: ShmPixelBuf) usize {
+    fn pitch(self: PixelBuf) usize {
         return self.width * 4;
     }
 
-    fn size(self: ShmPixelBuf) usize {
+    fn size(self: PixelBuf) usize {
         return self.pixels.len * 4;
+    }
+};
+
+const PixelBuffers = struct {
+    idx: u1,
+    // FIXME: deinit
+    shared_mem: SharedMem,
+    buffers: [2]PixelBuf,
+    wl_buffers: [2]wlb.WlBuffer,
+
+    fn init(interfaces: *InterfaceRegistry) !PixelBuffers {
+        const width = 640;
+        const height = 480;
+        const stride = width * 4;
+        const shared_mem = try SharedMem.init(height * stride * 2);
+        const mapped = try shared_mem.map();
+
+        const buffers = [_]PixelBuf{
+            PixelBuf.init(mapped[0 .. mapped.len / 2], width, 0x00000000),
+            PixelBuf.init(mapped[mapped.len / 2 ..], width, 0xffffffff),
+        };
+
+        const wl_buffers = [_]wlb.WlBuffer{
+            try interfaces.register(wlb.WlBuffer),
+            try interfaces.register(wlb.WlBuffer),
+        };
+
+        return .{
+            .idx = 0,
+            .shared_mem = shared_mem,
+            .buffers = buffers,
+            .wl_buffers = wl_buffers,
+        };
+    }
+
+    fn registerBuffers(self: PixelBuffers, writer: std.net.Stream.Writer, wl_shm_pool: *wlb.WlShmPool) !void {
+        var offset: i32 = 0;
+        for (0..self.wl_buffers.len) |i| {
+            const pixels = self.buffers[i];
+            const wl_buf = self.wl_buffers[i];
+            try wl_shm_pool.createBuffer(writer, .{
+                .id = wl_buf.id,
+                .offset = offset,
+                .width = @intCast(pixels.width),
+                .height = @intCast(pixels.height()),
+                .stride = @intCast(pixels.pitch()),
+                // FIXME: Generate from wlgen xrgb8888
+                .format = 1,
+            });
+            offset += @intCast(pixels.size());
+        }
+    }
+
+    fn getActivePixelBuf(self: *PixelBuffers) *PixelBuf {
+        return &self.buffers[self.idx];
+    }
+
+    fn getActiveWlBuffer(self: *PixelBuffers) *wlb.WlBuffer {
+        return &self.wl_buffers[self.idx];
+    }
+
+    fn swap(self: *PixelBuffers) void {
+        self.idx +%= 1;
+    }
+};
+
+const Animation = struct {
+    brightness: f32 = 0.0,
+    brightness_dir: bool = true,
+    time: u32 = 0,
+
+    fn step(self: *Animation, time_ms: u32) void {
+        defer self.time = time_ms;
+        if (self.time == 0) {
+            return;
+        }
+
+        const adjustment = 1.0 / 2000.0 * @as(f32, @floatFromInt(time_ms - self.time));
+        if (self.brightness_dir) {
+            self.brightness += adjustment;
+        } else {
+            self.brightness -= adjustment;
+        }
+
+        if (self.brightness > 1.0 or self.brightness < 0.0) {
+            self.brightness_dir = !self.brightness_dir;
+        }
     }
 };
 
@@ -323,7 +428,9 @@ const App = struct {
     wl_surface: wlb.WlSurface,
     xdg_surface: xdgsb.XdgSurface,
     stream: std.net.Stream,
-    pixels: ShmPixelBuf,
+    frame_callback: wlb.WlCallback,
+    pixel_buffers: PixelBuffers,
+    animation: Animation = .{},
 
     pub fn init(alloc: Allocator, stream: std.net.Stream, interfaces: *InterfaceRegistry, bound_interfaces: BoundInterfaces) !App {
         std.log.debug("Initializing app", .{});
@@ -351,33 +458,24 @@ const App = struct {
             .toplevel = toplevel.id,
         });
 
-        try wl_surface.commit(writer, .{});
-
-        const pixels = try ShmPixelBuf.init();
-
-        const wl_shm_pool = try interfaces.register(wlb.WlShmPool);
-
-        try createShmPool(alloc, stream, bound_interfaces.wl_shm, pixels, wl_shm_pool.id);
-
-        const wl_buffer = try interfaces.register(wlb.WlBuffer);
-
-        try wl_shm_pool.createBuffer(writer, .{
-            .id = wl_buffer.id,
-            .offset = 0,
-            .width = @intCast(pixels.width),
-            .height = @intCast(pixels.height()),
-            .stride = @intCast(pixels.pitch()),
-            // FIXME: Generate from wlgen xrgb8888
-            .format = 1,
-        });
+        var wl_shm_pool = try interfaces.register(wlb.WlShmPool);
+        var pixel_buffers = try PixelBuffers.init(interfaces);
+        try createShmPool(alloc, stream, bound_interfaces.wl_shm, pixel_buffers.shared_mem, wl_shm_pool.id);
+        try pixel_buffers.registerBuffers(stream.writer(), &wl_shm_pool);
 
         try wl_surface.attach(writer, .{
-            .buffer = wl_buffer.id,
+            .buffer = pixel_buffers.getActiveWlBuffer().id,
             .x = 0,
             .y = 0,
         });
+        pixel_buffers.swap();
 
         try wl_surface.commit(writer, .{});
+
+        const frame_callback = try interfaces.register(wlb.WlCallback);
+        try wl_surface.frame(writer, .{
+            .callback = frame_callback.id,
+        });
 
         return .{
             .interfaces = interfaces,
@@ -385,8 +483,9 @@ const App = struct {
             .xdg_wm_base = bound_interfaces.xdg_wm_base,
             .wl_surface = wl_surface,
             .xdg_surface = xdg_surface,
+            .frame_callback = frame_callback,
             .stream = stream,
-            .pixels = pixels,
+            .pixel_buffers = pixel_buffers,
         };
     }
 
@@ -397,7 +496,20 @@ const App = struct {
         };
 
         switch (interface) {
-            .display => try handleDisplayEvent(event),
+            .display => {
+                const parsed = try wlb.WlDisplay.Event.parse(event.header.op, event.data);
+                switch (parsed) {
+                    .err => |err| logWaylandErr(err),
+                    .delete_id => |req| {
+                        if (req.id == self.frame_callback.id) {
+                            try self.wl_surface.frame(self.stream.writer(), .{ .callback = self.frame_callback.id });
+                            try self.wl_surface.commit(self.stream.writer(), .{});
+                        } else {
+                            std.log.warn("Deletion of object {d} is not handled", .{req.id});
+                        }
+                    },
+                }
+            },
             .xdg_surface => {
                 const parsed = try xdgsb.XdgSurface.Event.parse(event.header.op, event.data);
                 try self.xdg_surface.ackConfigure(self.stream.writer(), .{
@@ -421,6 +533,35 @@ const App = struct {
                         std.log.warn("Unhandled toplevel event {any}", .{parsed});
                     },
                 }
+            },
+            .wl_callback => {
+                std.debug.assert(self.frame_callback.id == event.header.id);
+                const parsed = try wlb.WlCallback.Event.parse(event.header.op, event.data);
+                const time_ms = parsed.done.callback_data;
+
+                self.animation.step(time_ms);
+
+                const pixels = self.pixel_buffers.getActivePixelBuf();
+                const val_255: u32 = @intFromFloat(self.animation.brightness * 255);
+                var pixel_val = 0xff000000 | val_255;
+                pixel_val |= val_255 << 8;
+                pixel_val |= val_255 << 16;
+
+                @memset(pixels.pixels, pixel_val);
+                const wl_buf = self.pixel_buffers.getActiveWlBuffer();
+                try self.wl_surface.attach(self.stream.writer(), .{
+                    .buffer = wl_buf.id,
+                    .x = 0,
+                    .y = 0,
+                });
+                self.pixel_buffers.swap();
+                try self.wl_surface.damageBuffer(self.stream.writer(), .{
+                    .x = 0,
+                    .y = 0,
+                    .width = std.math.maxInt(i32),
+                    .height = std.math.maxInt(i32),
+                });
+                try self.wl_surface.commit(self.stream.writer(), .{});
             },
             else => try logUnusedEvent(interface, event),
         }
