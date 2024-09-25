@@ -61,6 +61,7 @@ pub fn build(b: *std.Build) !void {
     const wayland_bindings = bindings_generator.generate("wayland.zig", b.path("res/wayland.xml"));
     const xdg_shell_bindings = bindings_generator.generate("xdg_shell.zig", b.path("res/xdg-shell.xml"));
     const xdg_decoration_bindings = bindings_generator.generate("xdg_decoration.zig", b.path("res/xdg-decoration-unstable-v1.xml"));
+    const linux_dma_buf = bindings_generator.generate("linux_dma_buf.zig", b.path("res/linux-dmabuf-v1.xml"));
 
     const exe = b.addExecutable(.{
         .name = "sphwayland-client",
@@ -70,14 +71,20 @@ pub fn build(b: *std.Build) !void {
     });
 
     exe.addIncludePath(b.path("src"));
+    exe.linkSystemLibrary("GL");
+    exe.linkSystemLibrary("EGL");
     exe.addCSourceFile(.{
         .file = b.path("src/cmsg.c"),
+    });
+    exe.addCSourceFile(.{
+        .file = b.path("src/stb_image.c"),
     });
     exe.linkLibC();
 
     exe.root_module.addImport("wl_bindings", wayland_bindings);
     exe.root_module.addImport("xdg_shell_bindings", xdg_shell_bindings);
     exe.root_module.addImport("xdg_decoration_bindings", xdg_decoration_bindings);
+    exe.root_module.addImport("linux_dma_buf", linux_dma_buf);
     exe.root_module.addImport("wl_writer", wl_writer_mod);
     exe.root_module.addImport("wl_reader", wl_reader_mod);
 

@@ -16,6 +16,10 @@ pkgs.mkShell {
     pkg-config
     expat
     clang-tools
+    wayland
+    wayland-protocols
+    libGL
+    mesa
   ];
 }
 
