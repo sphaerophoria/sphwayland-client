@@ -276,7 +276,7 @@ static void initShaders() {
                                         uniform sampler2D tex;\n\
                                         \n\
                                         void main() {\n\
-                                            FragColor = texture(tex, texcoord); // Red color\n\
+                                            FragColor = textureLod(tex, texcoord, 99); // Red color\n\
                                         }\n\
                                         ";
                                         glShaderSource(fragmentShader, 1, &fragmentShaderSource, NULL);
@@ -318,7 +318,7 @@ void debugCallback(GLenum source,GLenum type,GLuint id,GLenum severity,GLsizei l
             EGLLabelKHR threadLabel,
             EGLLabelKHR objectLabel,
             const char* message) {
-    printf("EGL error: %d %s\n", error,  message);
+    printf("EGL error: 0x%x %s\n", error,  message);
  }
 
 int main(int argc, char const *argv[]) {
@@ -348,8 +348,8 @@ int main(int argc, char const *argv[]) {
     glGenTextures(1, &textureID);
     glBindTexture(GL_TEXTURE_2D, textureID);
 
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
@@ -423,6 +423,8 @@ int main(int argc, char const *argv[]) {
             EGL_DMA_BUF_PLANE0_FD_EXT, *texture_fd,
             EGL_DMA_BUF_PLANE0_OFFSET_EXT, 0,
             EGL_DMA_BUF_PLANE0_PITCH_EXT, 1024,
+            EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT, 0xffffffff,
+            EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT, 0x00ffffff,
             EGL_NONE,
         };
 
@@ -434,15 +436,6 @@ int main(int argc, char const *argv[]) {
     } else if (strcmp(argv[1], "client") == 0) {
         // Create and bind texture
         GLuint internalTextureId;
-        glGenTextures(1, &internalTextureId);
-        glBindTexture(GL_TEXTURE_2D, internalTextureId);
-
-        // Set texture parameters
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
         // Initialize texture data
         const int width = 256;
         const int height = 256;
@@ -458,18 +451,33 @@ int main(int argc, char const *argv[]) {
             data[i * 4 + 3] = 255; // Alpha
         }
 
+        glGenTextures(1, &internalTextureId);
+        glBindTexture(GL_TEXTURE_2D, internalTextureId);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        // Set texture parameters
+
         // Upload texture data to GPU
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
-        glGenerateMipmap(GL_TEXTURE_2D); // Generate mipmaps
+        //glGenerateMipmap(GL_TEXTURE_2D);
 
-        EGLImageKHR image = eglCreateImageKHR(state.egl_display, state.egl_context,  EGL_GL_TEXTURE_2D, (EGLClientBuffer)(uintptr_t)internalTextureId, NULL);
+        //textureID = internalTextureId;
+        EGLint attr[] = {
+            EGL_NONE,
+        };
+        EGLImageKHR image = eglCreateImageKHR(state.egl_display, state.egl_context,  EGL_GL_TEXTURE_2D, (EGLClientBuffer)(uintptr_t)internalTextureId, attr);
+        glFlush();
+
 
         int fourcc;
         int num_planes;
-        EGLuint64KHR modifiers;
+        EGLuint64KHR modifiers = 0;
         EGLBoolean success = eglExportDMABUFImageQueryMESA(state.egl_display, image, &fourcc, &num_planes, &modifiers);
         printf("success: %d\n", success);
         printf("format \"%*s\"\n", 4, (char*)&fourcc);
+        printf("modifiers \"%lx\"\n", modifiers);
         assert(num_planes == 1);
 
         glBindTexture(GL_TEXTURE_2D, textureID);
