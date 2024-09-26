@@ -464,9 +464,6 @@ int main(int argc, char const *argv[]) {
 
         EGLImageKHR image = eglCreateImageKHR(state.egl_display, state.egl_context,  EGL_GL_TEXTURE_2D, (EGLClientBuffer)(uintptr_t)internalTextureId, NULL);
 
-        glBindTexture(GL_TEXTURE_2D, textureID);
-        glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, image);
-
         int fourcc;
         int num_planes;
         EGLuint64KHR modifiers;
@@ -475,6 +472,8 @@ int main(int argc, char const *argv[]) {
         printf("format \"%*s\"\n", 4, (char*)&fourcc);
         assert(num_planes == 1);
 
+        glBindTexture(GL_TEXTURE_2D, textureID);
+        glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, image);
 
         // This is fine because there is only 1 plane (i think)
         int fd;
