@@ -7,9 +7,16 @@ const HeaderLE = wlw.HeaderLE;
 const wlb = @import("wl_bindings");
 const xdgsb = @import("xdg_shell_bindings");
 const xdgdb = @import("xdg_decoration_bindings");
+const dmab = @import("linux_dma_buf");
+const ModelRenderer = @import("ModelRenderer.zig");
 
 const cmsg = @cImport({
     @cInclude("cmsg.h");
+});
+
+const gl_impl = @cImport({
+    @cInclude("gl_impl.h");
+    @cInclude("drm/drm_fourcc.h");
 });
 
 fn openWaylandConnection(alloc: Allocator) !std.net.Stream {
@@ -75,7 +82,13 @@ fn createShmPool(alloc: Allocator, stream: std.net.Stream, wl_shm: wlb.WlShm, sh
 fn logUnusedEvent(interface: InterfaceType, event: Event) !void {
     switch (interface) {
         .display => {
-            std.log.warn("Unused event: {any}", .{try wlb.WlDisplay.Event.parse(event.header.op, event.data)});
+            const parsed = try wlb.WlDisplay.Event.parse(event.header.op, event.data);
+            switch (parsed) {
+                .err => |err| logWaylandErr(err),
+                else => {
+                    std.log.warn("Unused event: {any}", .{parsed});
+                },
+            }
         },
         .registry => {
             std.log.warn("Unused event: {any}", .{try wlb.WlRegistry.Event.parse(event.header.op, event.data)});
@@ -97,6 +110,12 @@ fn logUnusedEvent(interface: InterfaceType, event: Event) !void {
         },
         .wl_buffer => {
             std.log.warn("Unused event: {any}", .{try wlb.WlBuffer.Event.parse(event.header.op, event.data)});
+        },
+        .dmabuf => {
+            std.log.warn("Unused event: {any}", .{try dmab.ZwpLinuxDmabufV1.Event.parse(event.header.op, event.data)});
+        },
+        .dmabuf_params => {
+            std.log.warn("Unused event: {any}", .{try dmab.ZwpLinuxBufferParamsV1.Event.parse(event.header.op, event.data)});
         },
         .decoration_manager => {
             std.log.warn("Unused zxdg_decoration_manager event", .{});
@@ -130,6 +149,8 @@ const InterfaceType = enum {
     xdg_toplevel,
     decoration_manager,
     top_level_decoration,
+    dmabuf,
+    dmabuf_params,
 };
 
 const InterfaceRegistry = struct {
@@ -196,6 +217,8 @@ const InterfaceRegistry = struct {
             xdgsb.XdgSurface => .xdg_surface,
             xdgsb.XdgToplevel => .xdg_toplevel,
             wlb.WlBuffer => .wl_buffer,
+            dmab.ZwpLinuxDmabufV1 => .dmabuf,
+            dmab.ZwpLinuxBufferParamsV1 => .dmabuf_params,
             else => {
                 @compileError("Unsupported interface type " ++ @typeName(T));
             },
@@ -208,6 +231,7 @@ const BoundInterfaces = struct {
     xdg_wm_base: xdgsb.XdgWmBase,
     wl_shm: wlb.WlShm,
     decoration_manager: xdgdb.ZxdgDecorationManagerV1,
+    dmabuf: dmab.ZwpLinuxDmabufV1,
 };
 
 fn bindInterfaces(stream: std.net.Stream, interfaces: *InterfaceRegistry) !BoundInterfaces {
@@ -218,6 +242,7 @@ fn bindInterfaces(stream: std.net.Stream, interfaces: *InterfaceRegistry) !Bound
     var xdg_wm_base: ?xdgsb.XdgWmBase = null;
     var wl_shm: ?wlb.WlShm = null;
     var decoration_manager: ?xdgdb.ZxdgDecorationManagerV1 = null;
+    var dmabuf: ?dmab.ZwpLinuxDmabufV1 = null;
 
     while (try it.getAvailableEvent()) |event| {
         const interface = interfaces.get(event.header.id) orelse {
@@ -244,6 +269,7 @@ fn bindInterfaces(stream: std.net.Stream, interfaces: *InterfaceRegistry) !Bound
                             xdg_wm_base,
                             wl_shm,
                             zxdg_decoration_manager_v1,
+                            zwp_linux_dmabuf_v1,
                         };
 
                         const interface_name = std.meta.stringToEnum(DesiredInterfaces, g.interface) orelse {
@@ -258,6 +284,7 @@ fn bindInterfaces(stream: std.net.Stream, interfaces: *InterfaceRegistry) !Bound
                             .xdg_wm_base => xdg_wm_base = try interfaces.bind(xdgsb.XdgWmBase, writer, g),
                             .wl_shm => wl_shm = try interfaces.bind(wlb.WlShm, writer, g),
                             .zxdg_decoration_manager_v1 => decoration_manager = try interfaces.bind(xdgdb.ZxdgDecorationManagerV1, writer, g),
+                            .zwp_linux_dmabuf_v1 => dmabuf = try interfaces.bind(dmab.ZwpLinuxDmabufV1, writer, g),
                         }
                     },
                     .global_remove => {
@@ -274,6 +301,7 @@ fn bindInterfaces(stream: std.net.Stream, interfaces: *InterfaceRegistry) !Bound
         .xdg_wm_base = xdg_wm_base orelse return error.NoXdgWmBase,
         .wl_shm = wl_shm orelse return error.NoWlShm,
         .decoration_manager = decoration_manager orelse return error.DecorationManager,
+        .dmabuf = dmabuf orelse return error.NoDmaBuf,
     };
 }
 
@@ -400,15 +428,15 @@ const PixelBuffers = struct {
 const Animation = struct {
     brightness: f32 = 0.0,
     brightness_dir: bool = true,
-    time: u32 = 0,
+    time: std.time.Instant,
+    applied_time: std.time.Instant,
 
-    fn step(self: *Animation, time_ms: u32) void {
-        defer self.time = time_ms;
-        if (self.time == 0) {
-            return;
-        }
+    fn step(self: *Animation, now: std.time.Instant) void {
+        defer self.time = now;
+        const delta_ns = now.since(self.time);
+        const delta_ms = delta_ns / std.time.ns_per_ms;
 
-        const adjustment = 1.0 / 2000.0 * @as(f32, @floatFromInt(time_ms - self.time));
+        const adjustment = 1.0 / 2000.0 * @as(f32, @floatFromInt(delta_ms));
         if (self.brightness_dir) {
             self.brightness += adjustment;
         } else {
@@ -429,11 +457,14 @@ const App = struct {
     xdg_surface: xdgsb.XdgSurface,
     stream: std.net.Stream,
     frame_callback: wlb.WlCallback,
-    pixel_buffers: PixelBuffers,
-    animation: Animation = .{},
+    gl_buffers: GlBuffers,
+    //pixel_buffers: PixelBuffers,
+    animation: Animation,
+    model_renderer: ModelRenderer,
 
-    pub fn init(alloc: Allocator, stream: std.net.Stream, interfaces: *InterfaceRegistry, bound_interfaces: BoundInterfaces) !App {
+    pub fn init(alloc: Allocator, stream: std.net.Stream, gl_buffers_const: GlBuffers, interfaces: *InterfaceRegistry, bound_interfaces: BoundInterfaces) !App {
         std.log.debug("Initializing app", .{});
+        var gl_buffers = gl_buffers_const;
         const writer = stream.writer();
 
         const wl_surface = try interfaces.register(wlb.WlSurface);
@@ -458,17 +489,17 @@ const App = struct {
             .toplevel = toplevel.id,
         });
 
-        var wl_shm_pool = try interfaces.register(wlb.WlShmPool);
-        var pixel_buffers = try PixelBuffers.init(interfaces);
-        try createShmPool(alloc, stream, bound_interfaces.wl_shm, pixel_buffers.shared_mem, wl_shm_pool.id);
-        try pixel_buffers.registerBuffers(stream.writer(), &wl_shm_pool);
+        //var wl_shm_pool = try interfaces.register(wlb.WlShmPool);
+        //var pixel_buffers = try PixelBuffers.init(interfaces);
+        //try createShmPool(alloc, stream, bound_interfaces.wl_shm, pixel_buffers.shared_mem, wl_shm_pool.id);
+        //try pixel_buffers.registerBuffers(stream.writer(), &wl_shm_pool);
 
         try wl_surface.attach(writer, .{
-            .buffer = pixel_buffers.getActiveWlBuffer().id,
+            .buffer = gl_buffers.getActiveWlBuffer().id,
             .x = 0,
             .y = 0,
         });
-        pixel_buffers.swap();
+        gl_buffers.swap();
 
         try wl_surface.commit(writer, .{});
 
@@ -477,6 +508,7 @@ const App = struct {
             .callback = frame_callback.id,
         });
 
+        const model_renderer = try ModelRenderer.init(alloc);
         return .{
             .interfaces = interfaces,
             .compositor = bound_interfaces.compositor,
@@ -485,7 +517,13 @@ const App = struct {
             .xdg_surface = xdg_surface,
             .frame_callback = frame_callback,
             .stream = stream,
-            .pixel_buffers = pixel_buffers,
+            .gl_buffers = gl_buffers,
+            .animation = .{
+                .time = try std.time.Instant.now(),
+                .applied_time = try std.time.Instant.now(),
+            },
+            .model_renderer = model_renderer,
+            //.pixel_buffers = pixel_buffers,
         };
     }
 
@@ -537,24 +575,39 @@ const App = struct {
             .wl_callback => {
                 std.debug.assert(self.frame_callback.id == event.header.id);
                 const parsed = try wlb.WlCallback.Event.parse(event.header.op, event.data);
-                const time_ms = parsed.done.callback_data;
+                std.debug.assert(parsed == .done);
+                //const time_ms = parsed.done.callback_data;
 
-                self.animation.step(time_ms);
+                const now = try std.time.Instant.now();
+                self.animation.step(now);
 
-                const pixels = self.pixel_buffers.getActivePixelBuf();
-                const val_255: u32 = @intFromFloat(self.animation.brightness * 255);
-                var pixel_val = 0xff000000 | val_255;
-                pixel_val |= val_255 << 8;
-                pixel_val |= val_255 << 16;
+                //if (now.since(self.animation.applied_time) < std.time.ns_per_s) {
+                //    break :blk;
+                //}
 
-                @memset(pixels.pixels, pixel_val);
-                const wl_buf = self.pixel_buffers.getActiveWlBuffer();
+                self.animation.applied_time = now;
+                const fbo = self.gl_buffers.getActiveFramebuffer();
+                std.debug.print("binding fbo: {d}\n", .{fbo});
+                gl_impl.glBindFramebuffer(gl_impl.GL_FRAMEBUFFER, fbo);
+
+                gl_impl.glClearColor(self.animation.brightness, self.animation.brightness, self.animation.brightness, 1.0);
+                gl_impl.glClear(gl_impl.GL_COLOR_BUFFER_BIT);
+                gl_impl.glFlush();
+
+                //const pixels = self.pixel_buffers.getActivePixelBuf();
+                //const val_255: u32 = @intFromFloat(self.animation.brightness * 255);
+                //var pixel_val = 0xff000000 | val_255;
+                //pixel_val |= val_255 << 8;
+                //pixel_val |= val_255 << 16;
+
+                //@memset(pixels.pixels, pixel_val);
+                const wl_buf = self.gl_buffers.getActiveWlBuffer();
                 try self.wl_surface.attach(self.stream.writer(), .{
                     .buffer = wl_buf.id,
                     .x = 0,
                     .y = 0,
                 });
-                self.pixel_buffers.swap();
+                self.gl_buffers.swap();
                 try self.wl_surface.damageBuffer(self.stream.writer(), .{
                     .x = 0,
                     .y = 0,
@@ -686,6 +739,131 @@ pub fn EventIt(comptime buf_size: comptime_int) type {
     };
 }
 
+const GlBuffers = struct {
+    framebuffer_ids: [2]u32,
+    wl_buffers: [2]wlb.WlBuffer,
+    idx: u1 = 0,
+
+    fn getActiveFramebuffer(self: *GlBuffers) u32 {
+        return self.framebuffer_ids[self.idx];
+    }
+
+    fn getActiveWlBuffer(self: *GlBuffers) *wlb.WlBuffer {
+        return &self.wl_buffers[self.idx];
+    }
+
+    fn swap(self: *GlBuffers) void {
+        self.idx +%= 1;
+    }
+};
+
+fn createGlBackedBuffers(alloc: Allocator, stream: std.net.Stream, interfaces: *InterfaceRegistry, bound_interfaces: BoundInterfaces) !GlBuffers {
+    const writer = stream.writer();
+
+    var framebuffer_ids: [2]u32 = undefined;
+    var wl_buffers: [2]wlb.WlBuffer = undefined;
+    const egl_params = gl_impl.offscreenEGLinit();
+
+    for (0..2) |idx| {
+        const buffer_params = try interfaces.register(dmab.ZwpLinuxBufferParamsV1);
+        try bound_interfaces.dmabuf.createParams(writer, .{
+            .params_id = buffer_params.id,
+        });
+
+        const width = 256;
+        const height = 256;
+
+        const texture_id = gl_impl.makeTestTexture(width, height);
+        framebuffer_ids[idx] = gl_impl.makeFrameBuffer(texture_id);
+        const zwp_params = gl_impl.makeTextureFileDescriptor(texture_id, egl_params.display, egl_params.context);
+
+        var to_send = std.ArrayList(u8).init(alloc);
+        defer to_send.deinit();
+        try buffer_params.add(to_send.writer(), .{
+            .fd = {}, // out of band,
+            .plane_idx = 0, // assumed single plane
+            .offset = @intCast(zwp_params.offset),
+            .stride = @intCast(zwp_params.stride),
+            .modifier_hi = @intCast(zwp_params.modifiers >> 32),
+            .modifier_lo = @truncate(zwp_params.modifiers),
+        });
+
+        // FIXME: Heavy dupplication w/ createShmPool
+        const cmsg_buf_alignment = 8;
+        const cmsg_buf = try alloc.allocWithOptions(
+            u8,
+            cmsg.getCmsgSpace(@sizeOf(std.posix.fd_t)),
+            cmsg_buf_alignment,
+            null,
+        );
+        defer alloc.free(cmsg_buf);
+
+        cmsg.makeFdTransferCmsg(
+            cmsg_buf.ptr,
+            @ptrCast(&zwp_params.fd),
+            @sizeOf(std.posix.fd_t),
+        );
+
+        const iov = [1]std.posix.iovec_const{.{
+            .base = to_send.items.ptr,
+            .len = to_send.items.len,
+        }};
+
+        const msghdr = std.posix.msghdr_const{
+            .name = null,
+            .namelen = 0,
+            .iov = &iov,
+            .iovlen = 1,
+            .control = cmsg_buf.ptr,
+            .controllen = @intCast(cmsg_buf.len),
+            .flags = 0,
+        };
+
+        // FIXME: check result
+        _ = try std.posix.sendmsg(stream.handle, &msghdr, 0);
+
+        std.debug.print("{any}\n", .{zwp_params});
+        try buffer_params.create(writer, .{
+            .width = width,
+            .height = height,
+            .format = @bitCast(zwp_params.fourcc),
+            .flags = 0,
+        });
+
+        var it = EventIt(4096).init(stream);
+        while (true) {
+            const event = try it.getEventBlocking();
+            const interface_type = interfaces.get(event.header.id) orelse {
+                std.log.warn("Unknown object: {d}\n", .{event.header.id});
+                continue;
+            };
+            switch (interface_type) {
+                .dmabuf_params => {
+                    const parsed = try dmab.ZwpLinuxBufferParamsV1.Event.parse(event.header.op, event.data);
+
+                    switch (parsed) {
+                        .created => |s| {
+                            wl_buffers[idx] = .{
+                                .id = s.buffer,
+                            };
+                        },
+                        .failed => {
+                            return error.CreateDmaBuf;
+                        },
+                    }
+                    break;
+                },
+                else => try logUnusedEvent(interface_type, event),
+            }
+        }
+    }
+
+    return .{
+        .framebuffer_ids = framebuffer_ids,
+        .wl_buffers = wl_buffers,
+    };
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -705,7 +883,8 @@ pub fn main() !void {
 
     const bound_interfaces = try bindInterfaces(stream, &interfaces);
 
-    var app = try App.init(alloc, stream, &interfaces, bound_interfaces);
+    const gl_buffers = try createGlBackedBuffers(alloc, stream, &interfaces, bound_interfaces);
+    var app = try App.init(alloc, stream, gl_buffers, &interfaces, bound_interfaces);
     var it = EventIt(4096).init(stream);
 
     while (true) {

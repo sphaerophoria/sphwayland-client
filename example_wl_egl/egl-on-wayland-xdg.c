@@ -321,6 +321,22 @@ void debugCallback(GLenum source,GLenum type,GLuint id,GLenum severity,GLsizei l
     printf("EGL error: 0x%x %s\n", error,  message);
  }
 
+
+GLuint genTexture() {
+    GLuint texture;
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    return texture;
+}
+
+#define bindEglExtension(__type, __name) __type __name = (__type)eglGetProcAddress(#__name);
+
+#if 0
 int main(int argc, char const *argv[]) {
     struct client_state state;
 
@@ -551,3 +567,4 @@ int main(int argc, char const *argv[]) {
 
     return 0;
 }
+#endif
