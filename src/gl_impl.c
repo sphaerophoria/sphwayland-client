@@ -16,7 +16,7 @@
 #define bindEglExtension(__type, __name) __type __name = (__type)eglGetProcAddress(#__name)
 
 void debugCallback(GLenum source,GLenum type,GLuint id,GLenum severity,GLsizei length,const GLchar *message,const void *userParam) {
-    printf("%*s\n", length, message);
+    printf("GL said something %*s\n", length, message);
 }
  void debugCallbackEgl(
             EGLenum error,
@@ -87,6 +87,9 @@ struct egl_params offscreenEGLinit(void) {
     const GLubyte* ver = glGetString(GL_VERSION);
     printf("GL_VERSION=%s\n", ver);
 
+    glEnable(GL_DEBUG_OUTPUT);
+    glDebugMessageCallback(debugCallback, NULL);
+
     return (struct egl_params){
         egl_display, egl_context
     };
@@ -122,12 +125,13 @@ struct texture_fd makeTextureFileDescriptor(GLuint texture, EGLDisplay display, 
     return ret;
 }
 
-GLuint makeFrameBuffer(GLuint texture) {
+GLuint makeFrameBuffer(GLuint texture, GLuint depth_texture) {
     GLuint fbo;
     glGenFramebuffers(1, &fbo);
 
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, depth_texture, 0);
     return fbo;
 }
 
@@ -147,6 +151,16 @@ GLuint makeTestTexture(uint32_t width, uint32_t height) {
 
     GLuint texture = genTexture();
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+    return texture;
+}
+
+// FIXME: renderbuffer?
+GLuint makeDepthTexture(uint32_t width, uint32_t height) {
+    GLuint texture = genTexture();
+    glTexImage2D(
+      GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, width, height, 0,
+      GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, NULL
+    );
     return texture;
 }
 

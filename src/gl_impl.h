@@ -19,4 +19,5 @@ struct texture_fd {
 struct egl_params offscreenEGLinit(void);
 GLuint makeTestTexture(uint32_t width, uint32_t height);
 struct texture_fd makeTextureFileDescriptor(GLuint texture, EGLDisplay display, EGLContext context);
-GLuint makeFrameBuffer(GLuint texture);
+GLuint makeFrameBuffer(GLuint texture, GLuint depth_texture);
+GLuint makeDepthTexture(uint32_t width, uint32_t height);

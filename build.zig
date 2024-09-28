@@ -79,6 +79,9 @@ pub fn build(b: *std.Build) !void {
     exe.addCSourceFile(.{
         .file = b.path("src/gl_impl.c"),
     });
+    exe.addCSourceFile(.{
+        .file = b.path("src/stb_image.c"),
+    });
     exe.linkLibC();
 
     exe.root_module.addImport("wl_bindings", wayland_bindings);

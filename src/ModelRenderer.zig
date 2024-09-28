@@ -11,7 +11,7 @@ const c = @cImport({
 const ModelRenderer = @This();
 
 model_transform: Mat4 = Mat4.identity(),
-fov: f32 = std.math.pi / 4.0,
+fov: f32 = std.math.pi / 8.0,
 buffers: BufferPair,
 program: c.GLuint,
 num_vertices: c_int,
@@ -21,11 +21,11 @@ texture: c.GLuint,
 
 // FIXME: deinit
 pub fn init(alloc: Allocator) !ModelRenderer {
-    const model = try Model.load(alloc, "untitled.obj");
+    const model = try Model.load(alloc, @embedFile("ModelRenderer/model.obj"));
     const buffers = try bindModel(alloc, model);
-    const img = try Img.init("Untitled.001.png");
+    const img = try Img.init(@embedFile("ModelRenderer/model.png"));
     const texture = texFromImg(img);
-    const program = try compileLinkProgram(@embedFile("vertex.glsl"), @embedFile("fragment.glsl"));
+    const program = try compileLinkProgram(@embedFile("ModelRenderer/vertex.glsl"), @embedFile("ModelRenderer/fragment.glsl"),);
     const transform_loc = c.glGetUniformLocation(program, "transform");
     const num_vertices: c_int =  @intCast(model.faces.len * 3);
 
@@ -330,13 +330,7 @@ const Model = struct {
     // Grouped in 3s, indexes into vertices
     faces: []Face,
 
-    fn load(alloc: Allocator, obj_path: []const u8) !Model {
-        const f = try std.fs.cwd().openFile(obj_path, .{});
-        defer f.close();
-
-        const data = try f.readToEndAlloc(alloc, 10_000_000);
-        defer alloc.free(data);
-
+    fn load(alloc: Allocator, data: []const u8) !Model {
         var line_it = std.mem.splitScalar(u8, data, '\n');
 
         var verts = std.ArrayList(Vert).init(alloc);
@@ -470,11 +464,11 @@ const Img = struct {
     data: []u32,
     width: usize,
 
-    pub fn init(path: [:0]const u8) !Img {
+    pub fn init(data: []const u8) !Img {
         var width: c_int = 0;
         var height_out: c_int = 0;
         c.stbi_set_flip_vertically_on_load(1);
-        const img_opt = c.stbi_load(path, &width, &height_out, null, 4);
+        const img_opt = c.stbi_load_from_memory(data.ptr, @intCast(data.len), &width, &height_out, null, 4);
         const img_ptr: [*]u8 = img_opt orelse return error.FailedToOpen;
         const img_u32: [*]u32 = @ptrCast(@alignCast(img_ptr));
 

@@ -10,6 +10,10 @@ const xdgdb = @import("xdg_decoration_bindings");
 const dmab = @import("linux_dma_buf");
 const ModelRenderer = @import("ModelRenderer.zig");
 
+pub const std_options = std.Options {
+    .log_level = .warn,
+};
+
 const cmsg = @cImport({
     @cInclude("cmsg.h");
 });
@@ -589,9 +593,14 @@ const App = struct {
                 const fbo = self.gl_buffers.getActiveFramebuffer();
                 std.debug.print("binding fbo: {d}\n", .{fbo});
                 gl_impl.glBindFramebuffer(gl_impl.GL_FRAMEBUFFER, fbo);
+                gl_impl.glViewport(0, 0, 256, 256);
 
                 gl_impl.glClearColor(self.animation.brightness, self.animation.brightness, self.animation.brightness, 1.0);
-                gl_impl.glClear(gl_impl.GL_COLOR_BUFFER_BIT);
+                gl_impl.glClearDepth(1.0);
+                gl_impl.glClear(gl_impl.GL_COLOR_BUFFER_BIT | gl_impl.GL_DEPTH_BUFFER_BIT);
+
+                self.model_renderer.applyMouseMovement(0.005, 0.010, 1.0);
+                self.model_renderer.render(1.0);
                 gl_impl.glFlush();
 
                 //const pixels = self.pixel_buffers.getActivePixelBuf();
@@ -774,7 +783,8 @@ fn createGlBackedBuffers(alloc: Allocator, stream: std.net.Stream, interfaces: *
         const height = 256;
 
         const texture_id = gl_impl.makeTestTexture(width, height);
-        framebuffer_ids[idx] = gl_impl.makeFrameBuffer(texture_id);
+        const depth_texture_id = gl_impl.makeDepthTexture(width, height);
+        framebuffer_ids[idx] = gl_impl.makeFrameBuffer(texture_id, depth_texture_id);
         const zwp_params = gl_impl.makeTextureFileDescriptor(texture_id, egl_params.display, egl_params.context);
 
         var to_send = std.ArrayList(u8).init(alloc);
@@ -827,7 +837,7 @@ fn createGlBackedBuffers(alloc: Allocator, stream: std.net.Stream, interfaces: *
             .width = width,
             .height = height,
             .format = @bitCast(zwp_params.fourcc),
-            .flags = 0,
+            .flags = 1,
         });
 
         var it = EventIt(4096).init(stream);
