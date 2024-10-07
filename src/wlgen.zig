@@ -6,6 +6,8 @@ pub const std_options = std.Options{
     .log_level = .warn,
 };
 
+const attribute_max_len = 128;
+
 const Arg = struct {
     name: []const u8,
     summary: []const u8,
@@ -42,7 +44,7 @@ const Arg = struct {
         }
     };
 
-    fn init(alloc: Allocator, attrs: *XmlParser.XmlAttrIter) !Arg {
+    fn init(alloc: Allocator, attrs: *XmlParser.AttributeIt) !Arg {
         var name: ?[]const u8 = null;
         errdefer if (name) |n| alloc.free(n);
 
@@ -55,19 +57,23 @@ const Arg = struct {
 
         const ArgTag = enum { name, interface, type, summary };
 
-        while (attrs.next()) |attr| {
-            const arg_tag = std.meta.stringToEnum(ArgTag, attr.key) orelse {
-                std.log.debug("Unhandled arg tag: {s}", .{attr.key});
+        while (try attrs.next()) |attr| {
+            var key_buf: [attribute_max_len]u8 = undefined;
+            const key = try attr.key.makeContiguousBuf(&key_buf);
+            const arg_tag = std.meta.stringToEnum(ArgTag, key) orelse {
+                std.log.debug("Unhandled arg tag: {s}", .{key});
                 continue;
             };
 
             switch (arg_tag) {
-                .name => name = try alloc.dupe(u8, attr.val),
+                .name => name = try attr.val.makeContiguousAlloc(alloc),
                 .interface => has_interface = true,
                 .type => {
-                    typ = try Arg.Type.fromString(attr.val);
+                    var val_buf: [attribute_max_len]u8 = undefined;
+                    const val = try attr.val.makeContiguousBuf(&val_buf);
+                    typ = try Arg.Type.fromString(val);
                 },
-                .summary => summary = try alloc.dupe(u8, attr.val),
+                .summary => summary = try attr.val.makeContiguousAlloc(alloc),
             }
         }
 
@@ -102,13 +108,15 @@ const Interface = struct {
             description: std.ArrayListUnmanaged(u8) = .{},
             args: std.ArrayListUnmanaged(Arg) = .{},
 
-            fn init(alloc: Allocator, attrs: *XmlParser.XmlAttrIter) !@This() {
+            fn init(alloc: Allocator, attrs: *XmlParser.AttributeIt) !@This() {
                 var name: ?[]const u8 = null;
                 errdefer if (name) |n| alloc.free(n);
 
-                while (attrs.next()) |attr| {
-                    if (std.mem.eql(u8, attr.key, "name")) {
-                        name = try alloc.dupe(u8, attr.val);
+                while (try attrs.next()) |attr| {
+                    var key_buf: [attribute_max_len]u8 = undefined;
+                    const key = try attr.key.makeContiguousBuf(&key_buf);
+                    if (std.mem.eql(u8, key, "name")) {
+                        name = try attr.val.makeContiguousAlloc(alloc);
                         break;
                     }
                 }
@@ -159,19 +167,26 @@ const Interface = struct {
 
         unfininshed_request_event: RequestEvent.Builder = .{},
 
-        pub fn init(alloc: Allocator, attrs: *XmlParser.XmlAttrIter) !Builder {
+        pub fn init(alloc: Allocator, attrs: *XmlParser.AttributeIt) !Builder {
             var name: ?[]const u8 = null;
             errdefer if (name) |n| alloc.free(n);
             var version: ?u32 = null;
 
             const Field = enum { name, version };
 
-            while (attrs.next()) |attr| {
-                const field = std.meta.stringToEnum(Field, attr.key) orelse continue;
+            while (try attrs.next()) |attr| {
+                var key_buf: [attribute_max_len]u8 = undefined;
+                const key = try attr.key.makeContiguousBuf(&key_buf);
+
+                const field = std.meta.stringToEnum(Field, key) orelse continue;
 
                 switch (field) {
-                    .name => name = try alloc.dupe(u8, attr.val),
-                    .version => version = try std.fmt.parseInt(u32, attr.val, 10),
+                    .name => name = try attr.val.makeContiguousAlloc(alloc),
+                    .version => {
+                        var val_buf: [attribute_max_len]u8 = undefined;
+                        const val = try attr.val.makeContiguousBuf(&val_buf);
+                        version = try std.fmt.parseInt(u32, val, 10);
+                    },
                 }
             }
 
@@ -181,7 +196,7 @@ const Interface = struct {
             };
         }
 
-        pub fn pushNewReqEvent(self: *Builder, alloc: Allocator, attrs: *XmlParser.XmlAttrIter) !void {
+        pub fn pushNewReqEvent(self: *Builder, alloc: Allocator, attrs: *XmlParser.AttributeIt) !void {
             self.unfininshed_request_event = try RequestEvent.Builder.init(alloc, attrs);
         }
 
@@ -279,9 +294,7 @@ const WaylandXmlParser = struct {
         self.unfinished_interface.deinit(self.alloc);
     }
 
-    fn onEnter(ctx: ?*anyopaque, name: []const u8, attrs: *XmlParser.XmlAttrIter) anyerror!void {
-        const self: *WaylandXmlParser = @ptrCast(@alignCast(ctx));
-
+    fn onEnter(self: *WaylandXmlParser, name: []const u8, attrs: *XmlParser.AttributeIt) anyerror!void {
         switch (self.state) {
             .top => {
                 std.debug.assert(std.mem.eql(u8, name, "protocol"));
@@ -300,7 +313,7 @@ const WaylandXmlParser = struct {
         }
     }
 
-    fn onProtocolEnter(self: *WaylandXmlParser, name: []const u8, attrs: *XmlParser.XmlAttrIter) !void {
+    fn onProtocolEnter(self: *WaylandXmlParser, name: []const u8, attrs: *XmlParser.AttributeIt) !void {
         if (std.mem.eql(u8, name, "interface")) {
             self.state = .interface;
             self.unfinished_interface = try Interface.Builder.init(self.alloc, attrs);
@@ -310,7 +323,7 @@ const WaylandXmlParser = struct {
         }
     }
 
-    fn onInterfaceEnter(self: *WaylandXmlParser, name: []const u8, attrs: *XmlParser.XmlAttrIter) !void {
+    fn onInterfaceEnter(self: *WaylandXmlParser, name: []const u8, attrs: *XmlParser.AttributeIt) !void {
         // FIXME: event
         const InterfaceTag = enum { description, request, event };
 
@@ -335,7 +348,7 @@ const WaylandXmlParser = struct {
         }
     }
 
-    fn onRequestEnter(self: *WaylandXmlParser, name: []const u8, attrs: *XmlParser.XmlAttrIter) !void {
+    fn onRequestEnter(self: *WaylandXmlParser, name: []const u8, attrs: *XmlParser.AttributeIt) !void {
         const tag = std.meta.stringToEnum(ReqEventTag, name) orelse {
             std.log.debug("Unhandled request child {s}", .{name});
             self.setStateUnknown(.request);
@@ -357,7 +370,7 @@ const WaylandXmlParser = struct {
         }
     }
 
-    fn onEventEnter(self: *WaylandXmlParser, name: []const u8, attrs: *XmlParser.XmlAttrIter) !void {
+    fn onEventEnter(self: *WaylandXmlParser, name: []const u8, attrs: *XmlParser.AttributeIt) !void {
         const tag = std.meta.stringToEnum(ReqEventTag, name) orelse {
             std.log.debug("Unhandled event child {s}", .{name});
             self.setStateUnknown(.request);
@@ -405,9 +418,7 @@ const WaylandXmlParser = struct {
         };
     }
 
-    fn onExit(ctx: ?*anyopaque, _: []const u8) anyerror!void {
-        const self: *WaylandXmlParser = @ptrCast(@alignCast(ctx));
-
+    fn onExit(self: *WaylandXmlParser) anyerror!void {
         switch (self.state) {
             .interface => {
                 try self.interfaces.append(
@@ -427,8 +438,7 @@ const WaylandXmlParser = struct {
         self.exitState();
     }
 
-    fn onCharData(ctx: ?*anyopaque, data: []const u8) anyerror!void {
-        const self: *WaylandXmlParser = @ptrCast(@alignCast(ctx));
+    fn onCharData(self: *WaylandXmlParser, data: []const u8) anyerror!void {
         if (self.state == .interface_description) {
             try self.unfinished_interface.description.appendSlice(self.alloc, data);
         }
@@ -755,21 +765,32 @@ fn parseWaylandXml(alloc: Allocator, wayland_xml_path: []const u8) ![]Interface 
     };
     defer wayland_parser.deinit();
 
-    var parser = try XmlParser.init(alloc, .{
-        .ctx = &wayland_parser,
-        .startElement = WaylandXmlParser.onEnter,
-        .endElement = WaylandXmlParser.onExit,
-        .charData = WaylandXmlParser.onCharData,
-    });
-    defer parser.deinit();
-
     const wayland_xml_file = try std.fs.cwd().openFile(wayland_xml_path, .{});
     defer wayland_xml_file.close();
 
+    var buf: [4096]u8 = undefined;
+    var parser = try XmlParser.init(&buf, wayland_xml_file);
+
     const wayland_xml_data = try wayland_xml_file.readToEndAlloc(alloc, 1e9);
     defer alloc.free(wayland_xml_data);
+    try wayland_xml_file.seekTo(0);
 
-    try parser.feed(wayland_xml_data);
+    while (try parser.next()) |item| {
+        switch (item.type) {
+            .element_start => {
+                var attr_it = item.attributeIt();
+                var name_buf: [attribute_max_len]u8 = undefined;
+                try wayland_parser.onEnter(try item.name.makeContiguousBuf(&name_buf), &attr_it);
+            },
+            .element_end => {
+                try wayland_parser.onExit();
+            },
+            .element_content => {
+                try wayland_parser.onCharData(wayland_xml_data[item.start..item.end]);
+            },
+            else => {},
+        }
+    }
 
     return try wayland_parser.interfaces.toOwnedSlice(alloc);
 }

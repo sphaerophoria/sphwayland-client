@@ -35,7 +35,6 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
-    wlgen.linkSystemLibrary("expat");
     wlgen.linkLibC();
     const wl_writer_mod = b.addModule("wl_writer", .{
         .root_source_file = b.path("src/wl_writer.zig"),
