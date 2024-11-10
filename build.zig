@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const BindingsGenerator = struct {
+pub const BindingsGenerator = struct {
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
@@ -8,9 +8,11 @@ const BindingsGenerator = struct {
     wl_writer: *std.Build.Module,
     wl_reader: *std.Build.Module,
 
-    fn generate(self: *const BindingsGenerator, name: []const u8, xml: std.Build.LazyPath) *std.Build.Module {
+    pub fn generate(self: *const BindingsGenerator, name: []const u8, xml: []const std.Build.LazyPath) *std.Build.Module {
         const wlgen_run = self.b.addRunArtifact(self.wlgen);
-        wlgen_run.addFileArg(xml);
+        for (xml) |x| {
+            wlgen_run.addFileArg(x);
+        }
         const bindings = wlgen_run.addOutputFileArg(name);
 
         const bindings_mod = self.b.addModule("bindings", .{
@@ -36,6 +38,8 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
     wlgen.linkLibC();
+    b.installArtifact(wlgen);
+
     const wl_writer_mod = b.addModule("wl_writer", .{
         .root_source_file = b.path("src/wl_writer.zig"),
         .target = target,
@@ -57,10 +61,24 @@ pub fn build(b: *std.Build) !void {
         .wlgen = wlgen,
     };
 
-    const wayland_bindings = bindings_generator.generate("wayland.zig", b.path("res/wayland.xml"));
-    const xdg_shell_bindings = bindings_generator.generate("xdg_shell.zig", b.path("res/xdg-shell.xml"));
-    const xdg_decoration_bindings = bindings_generator.generate("xdg_decoration.zig", b.path("res/xdg-decoration-unstable-v1.xml"));
-    const linux_dma_buf = bindings_generator.generate("linux_dma_buf.zig", b.path("res/linux-dmabuf-v1.xml"));
+    const wayland_bindings = bindings_generator.generate(
+        "wayland.zig",
+        &.{
+            b.path("res/wayland.xml"),
+            b.path("res/xdg-shell.xml"),
+            b.path("res/xdg-decoration-unstable-v1.xml"),
+            b.path("res/linux-dmabuf-v1.xml"),
+        });
+
+    const sphwayland = b.addModule("sphwayland", .{
+        .root_source_file = b.path("src/wayland.zig"),
+    });
+    sphwayland.addImport("wl_writer", wl_writer_mod);
+    sphwayland.addImport("wl_reader", wl_reader_mod);
+    sphwayland.addCSourceFile(.{
+        .file = b.path("src/cmsg.c"),
+    });
+    sphwayland.addIncludePath(b.path("src"));
 
     const exe = b.addExecutable(.{
         .name = "sphwayland-client",
@@ -69,23 +87,16 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
 
-    exe.addIncludePath(b.path("src"));
     exe.linkSystemLibrary("GL");
     exe.linkSystemLibrary("EGL");
-    exe.addCSourceFile(.{
-        .file = b.path("src/cmsg.c"),
-    });
+    exe.addIncludePath(b.path("src"));
     exe.addCSourceFile(.{
         .file = b.path("src/stb_image.c"),
     });
     exe.linkLibC();
 
+    exe.root_module.addImport("sphwayland", sphwayland);
     exe.root_module.addImport("wl_bindings", wayland_bindings);
-    exe.root_module.addImport("xdg_shell_bindings", xdg_shell_bindings);
-    exe.root_module.addImport("xdg_decoration_bindings", xdg_decoration_bindings);
-    exe.root_module.addImport("linux_dma_buf", linux_dma_buf);
-    exe.root_module.addImport("wl_writer", wl_writer_mod);
-    exe.root_module.addImport("wl_reader", wl_reader_mod);
 
     b.installArtifact(exe);
 }

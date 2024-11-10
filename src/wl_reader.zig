@@ -17,6 +17,7 @@ pub fn parseDataResponse(comptime T: type, data: []const u8) !T {
             []const u8 => {
                 @field(ret, field.name) = try it.getArray();
             },
+            void => {},
             else => @compileError("Unimplemented parser for " ++ field.name),
         }
     }

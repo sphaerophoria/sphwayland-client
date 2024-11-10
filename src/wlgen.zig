@@ -713,6 +713,20 @@ fn ZigBindingsWriter(comptime Writer: type) type {
             }
         }
 
+        fn writeEventUnion(self: *Self, interfaces: []const Interface) !void {
+            try self.writer.writeAll("pub const WaylandEventType = enum {\n");
+            for (interfaces) |interface| {
+                try self.writer.print("    {s},\n", .{interface.name});
+            }
+            try self.writer.writeAll("};\n\n");
+
+            try self.writer.writeAll("pub const WaylandEvent = union(WaylandEventType) {\n");
+            for (interfaces) |interface| {
+                try self.writer.print("    {s}: {s}.Event,\n", .{ interface.name, snakeToPascal(interface.name) });
+            }
+            try self.writer.writeAll("};\n\n");
+        }
+
         fn writeInterface(self: *Self, interface: Interface) !void {
             try self.writeInterfaceStart(interface);
 
@@ -720,27 +734,31 @@ fn ZigBindingsWriter(comptime Writer: type) type {
                 try self.writeInterfaceReq(interface, req, i);
             }
 
-            try self.writeEventsStart();
+            if (interface.events.len == 0) {
+                try self.writer.writeAll("    pub const Event = struct {};");
+            } else {
+                try self.writeEventsStart();
 
-            for (interface.events) |event| {
-                try self.writeEventField(event);
-            }
-
-            try self.writer.writeByte('\n');
-
-            for (interface.events) |event| {
-                try self.writeEventType(event);
-            }
-
-            if (anyEventCanBeParsed(interface)) {
-                try self.writeEventParseStart();
-                for (interface.events, 0..) |event, i| {
-                    try self.writeEventParseStatement(event, i);
+                for (interface.events) |event| {
+                    try self.writeEventField(event);
                 }
-                try self.writeEventParseEnd(interface);
-            }
 
-            try self.writeEventsEnd();
+                try self.writer.writeByte('\n');
+
+                for (interface.events) |event| {
+                    try self.writeEventType(event);
+                }
+
+                if (anyEventCanBeParsed(interface)) {
+                    try self.writeEventParseStart();
+                    for (interface.events, 0..) |event, i| {
+                        try self.writeEventParseStatement(event, i);
+                    }
+                    try self.writeEventParseEnd(interface);
+                }
+
+                try self.writeEventsEnd();
+            }
             try self.writeInterfaceEnd();
         }
     };
@@ -750,13 +768,6 @@ fn zigBindingsWriter(writer: anytype) ZigBindingsWriter(@TypeOf(writer)) {
     return .{
         .writer = writer,
     };
-}
-
-fn deinitInterfaces(alloc: Allocator, interfaces: []Interface) void {
-    for (interfaces) |*interface| {
-        interface.deinit(alloc);
-    }
-    alloc.free(interfaces);
 }
 
 fn parseWaylandXml(alloc: Allocator, wayland_xml_path: []const u8) ![]Interface {
@@ -804,11 +815,7 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(alloc);
     defer std.process.argsFree(alloc, args);
 
-    const wayland_xml_path = args[1];
-    const output_path = args[2];
-
-    const interfaces = try parseWaylandXml(alloc, wayland_xml_path);
-    defer deinitInterfaces(alloc, interfaces);
+    const output_path = args[args.len - 1];
 
     const output_file = try std.fs.cwd().createFile(output_path, .{});
     defer output_file.close();
@@ -819,7 +826,21 @@ pub fn main() !void {
     var zig_writer = zigBindingsWriter(buffered_output.writer());
     try zig_writer.writeImports();
 
-    for (interfaces) |interface| {
+    var interfaces = std.ArrayList(Interface).init(alloc);
+    defer {
+        for (interfaces.items) |*interface| interface.deinit(alloc);
+        interfaces.deinit();
+    }
+    for (args[1 .. args.len - 1]) |wayland_xml_path| {
+        const xml_interfaces = try parseWaylandXml(alloc, wayland_xml_path);
+        defer alloc.free(xml_interfaces);
+
+        try interfaces.appendSlice(xml_interfaces);
+    }
+
+    try zig_writer.writeEventUnion(interfaces.items);
+
+    for (interfaces.items) |interface| {
         try zig_writer.writeInterface(interface);
     }
 
