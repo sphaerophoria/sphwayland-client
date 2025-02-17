@@ -95,6 +95,11 @@ const App = struct {
             .id = wl_surface.id,
         });
 
+        // I don't understand why, but plasma seems to invert my Y axis.
+        try wl_surface.setBufferTransform(writer, .{
+            .transform = 6,
+        });
+
         const xdg_surface = try client.newId(wlb.XdgSurface);
         try bound_interfaces.xdg_wm_base.getXdgSurface(writer, .{
             .id = xdg_surface.id,
@@ -312,7 +317,7 @@ fn createGlBackedBuffers(
             .width = GlBuffers.width,
             .height = GlBuffers.height,
             .format = @bitCast(zwp_params.fourcc),
-            .flags = 1,
+            .flags = 0,
         });
 
         wl_buffers[idx] = try waitForZwpLinuxWlBuffer(client);
