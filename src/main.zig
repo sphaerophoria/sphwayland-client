@@ -19,15 +19,13 @@ const BoundInterfaces = struct {
 };
 
 fn bindInterfaces(client: *sphwayland.Client(wlb)) !BoundInterfaces {
-    var it = client.eventIt();
-    try it.retrieveEvents();
-
     var compositor: ?wlb.WlCompositor = null;
     var xdg_wm_base: ?wlb.XdgWmBase = null;
     var decoration_manager: ?wlb.ZxdgDecorationManagerV1 = null;
     var dmabuf: ?wlb.ZwpLinuxDmabufV1 = null;
 
-    while (try it.getAvailableEvent()) |event| {
+    try client.waitAnyAvailable();
+    while (try client.readAvailable()) |event| {
         switch (event.event) {
             .wl_display => |parsed| {
                 switch (parsed) {
@@ -254,9 +252,8 @@ const GlBuffers = struct {
 };
 
 fn waitForZwpLinuxWlBuffer(client: *sphwayland.Client(wlb)) !wlb.WlBuffer {
-    var it = client.eventIt();
     while (true) {
-        const event = try it.getEventBlocking();
+        const event = try client.readBlocking();
         switch (event.event) {
             .zwp_linux_buffer_params_v1 => |parsed| {
                 switch (parsed) {
@@ -279,6 +276,73 @@ fn waitForZwpLinuxWlBuffer(client: *sphwayland.Client(wlb)) !wlb.WlBuffer {
     }
 }
 
+fn waitForZwpLinuxDmaBufFeedback(client: *sphwayland.Client(wlb)) !void {
+    while (true) {
+        try client.waitAnyAvailable();
+        const event = try client.readBlocking();
+        switch (event.event) {
+            .zwp_linux_dmabuf_feedback_v1 => |parsed| {
+                switch (parsed) {
+                    .done => {
+                        break;
+                    },
+                    .format_table => |table_hdr| {
+                        const fd = event.fd orelse {
+                            std.log.warn("Got format table entry without fd, skipping", .{});
+                            continue;
+                        };
+                        const table = try std.posix.mmap(null, table_hdr.size, std.posix.PROT.READ, std.posix.system.MAP { .TYPE = .PRIVATE }, fd, 0);
+                        var i: usize = 0;
+                        while (i < table.len) {
+                            defer i += 16;
+                            const pair = table[i..i + 16];
+                            const format = pair[0..4];
+                            const modifier = std.mem.bytesToValue(u64, pair[8..]);
+
+                            std.log.debug("Format table entry {d:0>3}: {s}, 0x{x:0>16}", .{i / 16, format, modifier});
+                        }
+                    },
+                    .main_device => |device| {
+                        std.log.debug("Main device: 0x{x}" ,.{
+                            std.mem.bytesToValue(u64, device.device),
+                        });
+
+                    },
+                    .tranche_done => {},
+                    .tranche_target_device => |target| {
+                        std.log.debug("Target device: 0x{x}", .{target.device});
+
+                    },
+                    .tranche_formats => |format_ids|{
+                        std.log.debug("Num supported formats: {d}", .{format_ids.indices.len / 2});
+                        std.log.debug("Target format_ids: {any}", .{std.mem.bytesAsSlice(u16, format_ids.indices)});
+
+                    },
+                    .tranche_flags => |flags| {
+                      std.log.debug("Target flags: 0x{x}", .{flags.flags});
+                    },
+                }
+            },
+            else => sphwayland.logUnusedEvent(event.event),
+        }
+    }
+}
+
+fn getDmaBufParams(
+    client: *sphwayland.Client(wlb),
+    bound_interfaces: BoundInterfaces,
+) !void {
+    const writer = client.writer();
+    const feedback = try client.newId(wlb.ZwpLinuxDmabufFeedbackV1);
+
+    try bound_interfaces.dmabuf.getDefaultFeedback(writer, .{
+        .id = feedback.id,
+    });
+
+    try waitForZwpLinuxDmaBufFeedback(client);
+    try feedback.destroy(writer, .{});
+}
+
 fn createGlBackedBuffers(
     alloc: Allocator,
     egl_context: gl_helpers.EglContext,
@@ -287,9 +351,10 @@ fn createGlBackedBuffers(
 ) !GlBuffers {
     const writer = client.writer();
 
+    try getDmaBufParams(client, bound_interfaces);
+
     var framebuffers: [2]gl_helpers.FrameBuffer = undefined;
     var wl_buffers: [2]wlb.WlBuffer = undefined;
-
     for (0..2) |idx| {
         const buffer_params = try client.newId(wlb.ZwpLinuxBufferParamsV1);
         try bound_interfaces.dmabuf.createParams(writer, .{
@@ -349,10 +414,9 @@ pub fn main() !void {
 
     var app = try App.init(alloc, &client, &gl_buffers, bound_interfaces);
     defer app.deinit();
-    var it = client.eventIt();
 
     while (true) {
-        const event = try it.getEventBlocking();
+        const event = try client.readBlocking();
         const close = try app.handleEvent(event.event);
         if (close) return;
     }

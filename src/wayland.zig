@@ -11,7 +11,7 @@ pub fn Client(comptime Bindings: type) type {
     return struct {
         interfaces: InterfaceRegistry(Bindings),
         stream: std.net.Stream,
-        event_buf: DoubleEndedBuf = .{},
+        event_reader: EventReader(Bindings) = .{},
 
         const Self = @This();
 
@@ -51,12 +51,21 @@ pub fn Client(comptime Bindings: type) type {
             _ = self.interfaces.elems.remove(id);
         }
 
-        pub fn eventIt(self: *Self) EventIt(Bindings) {
-            return EventIt(Bindings).init(self);
-        }
-
         pub fn writer(self: *Self) std.net.Stream.Writer {
             return self.stream.writer();
+        }
+
+        pub fn waitAnyAvailable(self: *Self) !void {
+            // FIXME: maybe wait should be somewhere else
+            try EventReader(Bindings).wait(self.stream.handle);
+        }
+
+        pub fn readBlocking(self: *Self) !Event(Bindings){
+            return self.event_reader.readBlocking(self.stream.handle, &self.interfaces);
+        }
+
+        pub fn readAvailable(self: *Self) !?Event(Bindings){
+            return self.event_reader.readAvailable(self.stream.handle, &self.interfaces);
         }
     };
 }
@@ -184,82 +193,37 @@ pub fn InterfaceRegistry(comptime Bindings: type) type {
     };
 }
 
-// Data is read into the buffer in chunks, and consumed from the
-// beginning, once we cannot read any more from the buffer, we shift
-// the remaining data back and wait for more data to show up
-//
-// Wrapping the stream in a bufreader seems like a good idea, but the
-// edge case of half a header being at the end of the buf would not be
-// handled well there
-const DoubleEndedBuf = struct {
-    data: [4096]u8 = undefined,
-    back: usize = 0,
-    front: usize = 0,
-
-    fn shift(self: *DoubleEndedBuf) void {
-        std.mem.copyForwards(u8, &self.data, self.data[self.front..]);
-        self.back -= self.front;
-        self.front = 0;
-    }
-};
-
-pub fn EventIt(comptime Bindings: type) type {
+pub fn Event(comptime Bindings: type) type {
     return struct {
-        client: *Client(Bindings),
+        object_id: u32,
+        event: Bindings.WaylandEvent,
+        fd: ?i32 = null,
+    };
+}
+
+pub fn EventReader(comptime Bindings: type) type {
+    return struct {
+        in_progress: [4096]u8 = undefined,
+        in_progress_len: usize = 0,
+        state: union(enum) {
+            header,
+            content: struct {
+                header: HeaderLE,
+                fd: ?std.posix.fd_t,
+            },
+        } = .header,
 
         const Self = @This();
 
-        pub const Event = struct {
-            object_id: u32,
-            event: Bindings.WaylandEvent,
-        };
-
-        pub fn init(client: *Client(Bindings)) Self {
-            return .{
-                .client = client,
-            };
+        fn readBuf(self: *Self, desired_len: usize) []u8 {
+            return self.in_progress[self.in_progress_len..desired_len];
         }
 
-        // NOTE: Output data is backed by internal buffer and is invalidated on next call to next()
-        pub fn retrieveEvents(self: *Self) !void {
-            self.client.event_buf.shift();
-
-            const num_bytes_read = try self.client.stream.read(self.client.event_buf.data[self.client.event_buf.back..]);
-            if (num_bytes_read == 0) {
-                return error.RemoteClosed;
-            }
-
-            self.client.event_buf.back += num_bytes_read;
-        }
-
-        pub fn getEventBlocking(self: *Self) !Event {
-            while (true) {
-                if (try self.getAvailableEvent()) |v| {
-                    return v;
-                }
-                try self.wait();
-            }
-        }
-
-        pub fn getAvailableEvent(self: *Self) !?Event {
-            while (true) {
-                if (try self.getBufferedEvent()) |v| {
-                    return v;
-                }
-
-                if (!try self.dataInSocket()) {
-                    return null;
-                }
-
-                try self.retrieveEvents();
-            }
-        }
-
-        fn wait(self: *Self) !void {
+        fn wait(handle: std.posix.fd_t) !void {
             var num_ready: usize = 0;
             while (num_ready == 0) {
                 var pollfd = [1]std.posix.pollfd{.{
-                    .fd = self.client.stream.handle,
+                    .fd = handle,
                     .events = std.posix.POLL.IN,
                     .revents = 0,
                 }};
@@ -267,54 +231,165 @@ pub fn EventIt(comptime Bindings: type) type {
             }
         }
 
-        fn getBufferedEvent(self: *Self) !?Event {
-            const header_end = self.client.event_buf.front + @sizeOf(wlw.HeaderLE);
-            if (header_end > self.client.event_buf.back) {
-                return null;
-            }
-            const header = std.mem.bytesToValue(HeaderLE, self.client.event_buf.data[self.client.event_buf.front..header_end]);
-            const data_end = self.client.event_buf.front + header.size;
-            if (data_end > self.client.event_buf.data.len and self.client.event_buf.front == 0) {
-                return error.DataTooLarge;
-            }
-            if (data_end > self.client.event_buf.back) {
-                return null;
-            }
+        fn canProgress(self: *Self, handle: std.posix.fd_t) !bool {
+            const needs_content = switch (self.state) {
+                .content => |data| data.header.size > @sizeOf(HeaderLE),
+                .header => true,
+            };
+            return !needs_content or try dataInSocket(handle);
 
-            defer self.client.event_buf.front = data_end;
+        }
 
-            const data = self.client.event_buf.data[header_end..data_end];
-            const interface = self.client.interfaces.get(header.id) orelse return null;
+        pub fn readBlocking(self: *Self, handle :std.posix.fd_t, interfaces: *InterfaceRegistry(Bindings)) !Event(Bindings) {
+            while (true) {
+                try wait(handle);
+                if (try self.readAvailable(handle, interfaces)) |event| {
+                    return event;
+                }
+            }
+        }
 
-            inline for (std.meta.fields(Bindings.WaylandEvent)) |field| {
-                if (@field(Bindings.WaylandEventType, field.name) == interface) {
-                    if (@hasDecl(field.type, "parse")) {
-                        return .{
-                            .object_id = header.id,
-                            .event = @unionInit(Bindings.WaylandEvent, field.name, try field.type.parse(header.op, data)),
-                        };
-                    } else {
-                        return .{
-                            .object_id = header.id,
-                            .event = @unionInit(Bindings.WaylandEvent, field.name, .{}),
-                        };
-                    }
+        pub fn readAvailable(self: *Self, handle: std.posix.fd_t, interfaces: *InterfaceRegistry(Bindings)) !?Event(Bindings) {
+            while (try self.canProgress(handle)) {
+                switch (self.state) {
+                    .header => {
+                        const desired_size = @sizeOf(HeaderLE);
+                        @memset(&self.in_progress, 0);
+                        const res = try readWithAncillaryFd(handle, self.readBuf(desired_size));
+
+                        if (res.bytes_read == 0) {
+                            return error.RemoteClosed;
+                        }
+
+                        self.in_progress_len += res.bytes_read;
+                        if (self.in_progress_len == desired_size) {
+                            self.state = .{
+                                .content = .{
+                                    .header = std.mem.bytesToValue(HeaderLE, self.in_progress[0..self.in_progress_len]),
+                                    .fd = res.fd,
+                                },
+                            };
+                            self.in_progress_len = 0;
+                        }
+                    },
+                    .content => |content_data| {
+                        const header = content_data.header;
+                        var fd = content_data.fd;
+                        const desired_size = header.size - @sizeOf(HeaderLE);
+                        if (desired_size > 0) {
+
+                            const res = try readWithAncillaryFd(handle, self.readBuf(desired_size));
+                            self.in_progress_len += res.bytes_read;
+
+                            if (res.bytes_read == 0) {
+                                return error.RemoteClosed;
+                            }
+
+                            if (fd != null and res.fd != null) {
+                                std.log.warn("Got two file descriptors for single event, discarding second", .{});
+                            } else if (res.fd) |val| {
+                                fd = val;
+                            }
+                        }
+
+                        if (self.in_progress_len == desired_size) {
+                            defer {
+                                self.state = .header;
+                                self.in_progress_len = 0;
+                            }
+
+                            const interface = interfaces.get(header.id) orelse return null;
+
+                            inline for (std.meta.fields(Bindings.WaylandEvent)) |field| {
+                                if (@field(Bindings.WaylandEventType, field.name) == interface) {
+                                    if (@hasDecl(field.type, "parse")) {
+                                        return .{
+                                            .object_id = header.id,
+                                            .event = @unionInit(Bindings.WaylandEvent, field.name, try field.type.parse(header.op, self.in_progress[0..self.in_progress_len])),
+                                            .fd = fd,
+                                        };
+                                    } else {
+                                        return .{
+                                            .object_id = header.id,
+                                            .event = @unionInit(Bindings.WaylandEvent, field.name, .{}),
+                                            .fd = fd,
+                                        };
+                                    }
+                                }
+                            }
+                        }
+                    },
                 }
             }
 
-            unreachable;
-        }
-
-        fn dataInSocket(self: *Self) !bool {
-            var pollfd = [1]std.posix.pollfd{.{
-                .fd = self.client.stream.handle,
-                .events = std.posix.POLL.IN,
-                .revents = 0,
-            }};
-            const num_ready = try std.posix.poll(&pollfd, 0);
-            return num_ready != 0;
+            return null;
         }
     };
+}
+
+const FdReadRes = struct {
+    bytes_read: usize,
+    fd: ?std.posix.fd_t,
+};
+
+fn readWithAncillaryFd(handle: std.posix.fd_t, buf: []u8) !FdReadRes{
+    while (true) {
+        var recv_iov = std.posix.iovec {
+            .base = buf.ptr,
+            .len = buf.len,
+        };
+        var ctrl_buf: [4096]u8 = undefined;
+        var hdr = std.os.linux.msghdr {
+            .name = null,
+            .namelen = 0,
+            .iov = @ptrCast(&recv_iov),
+            .iovlen = 1,
+            .control = &ctrl_buf,
+            .controllen = ctrl_buf.len,
+            .flags = 0,
+        };
+
+        const rc = std.os.linux.recvmsg(handle, &hdr, 0);
+        const num_bytes_read: usize = switch (std.posix.errno(rc)) {
+            .SUCCESS => rc,
+            .INTR => continue,
+            .INVAL => unreachable,
+            .FAULT => unreachable,
+            .AGAIN => return error.WouldBlock,
+            .BADF => return error.NotOpenForReading, // Can be a race condition.
+            .IO => return error.InputOutput,
+            .ISDIR => return error.IsDir,
+            .NOBUFS => return error.SystemResources,
+            .NOMEM => return error.SystemResources,
+            .NOTCONN => return error.SocketNotConnected,
+            .CONNRESET => return error.ConnectionResetByPeer,
+            .TIMEDOUT => return error.ConnectionTimedOut,
+            else => |err| return std.posix.unexpectedErrno(err),
+        };
+
+        if (num_bytes_read == 0) {
+            return error.RemoteClosed;
+        }
+
+        var out_fd: ?std.posix.fd_t = null;
+        if (hdr.controllen != 0) {
+            out_fd = cmsg.getFdFromCmsg(@ptrCast(hdr.control));
+        }
+        return .{
+            .bytes_read = num_bytes_read,
+            .fd = out_fd,
+        };
+    }
+}
+
+fn dataInSocket(socket: std.posix.fd_t) !bool {
+    var pollfd = [1]std.posix.pollfd{.{
+        .fd = socket,
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    const num_ready = try std.posix.poll(&pollfd, 0);
+    return num_ready != 0;
 }
 
 fn openWaylandConnection(alloc: Allocator) !std.net.Stream {
