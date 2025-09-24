@@ -12,6 +12,7 @@ pub fn Client(comptime Bindings: type) type {
         interfaces: InterfaceRegistry(Bindings),
         stream: std.net.Stream,
         event_buf: DoubleEndedBuf = .{},
+        stream_writer: std.net.Stream.Writer,
 
         const Self = @This();
 
@@ -19,7 +20,8 @@ pub fn Client(comptime Bindings: type) type {
             const stream = try openWaylandConnection(alloc);
             const display = Bindings.WlDisplay{ .id = 1 };
             const registry = Bindings.WlRegistry{ .id = 2 };
-            try display.getRegistry(stream.writer(), .{
+            var stream_writer = stream.writer(&.{});
+            try display.getRegistry(&stream_writer.interface, .{
                 .registry = registry.id,
             });
 
@@ -28,6 +30,7 @@ pub fn Client(comptime Bindings: type) type {
             return .{
                 .interfaces = interfaces,
                 .stream = stream,
+                .stream_writer = stream_writer,
             };
         }
 
@@ -36,7 +39,7 @@ pub fn Client(comptime Bindings: type) type {
         }
 
         pub fn bind(self: *Self, comptime T: type, global: Bindings.WlRegistry.Event.Global) !T {
-            return try self.interfaces.bind(T, self.stream.writer(), global);
+            return try self.interfaces.bind(T, &self.stream_writer.interface, global);
         }
 
         pub fn newId(self: *Self, comptime T: type) !T {
@@ -55,8 +58,8 @@ pub fn Client(comptime Bindings: type) type {
             return EventIt(Bindings).init(self);
         }
 
-        pub fn writer(self: *Self) std.net.Stream.Writer {
-            return self.stream.writer();
+        pub fn writer(self: *Self) *std.Io.Writer {
+            return &self.stream_writer.interface;
         }
     };
 }
@@ -85,7 +88,7 @@ pub fn sendMessageWithFdAttachment(alloc: Allocator, stream: std.net.Stream, msg
     // This has to be a comptime known value, but the alignment is kinda
     // defined by the C macros. We'll just use 8 and assume that it can't be
     // wrong
-    const cmsg_buf_alignment = 8;
+    const cmsg_buf_alignment: std.mem.Alignment  = .@"8";
     const cmsg_buf = try alloc.allocWithOptions(
         u8,
         cmsg.getCmsgSpace(@sizeOf(std.posix.fd_t)),
@@ -149,7 +152,7 @@ pub fn InterfaceRegistry(comptime Bindings: type) type {
             return self.elems.get(id);
         }
 
-        pub fn bind(self: *Self, comptime T: type, writer: std.net.Stream.Writer, params: Bindings.WlRegistry.Event.Global) !T {
+        pub fn bind(self: *Self, comptime T: type, writer: *std.Io.Writer, params: Bindings.WlRegistry.Event.Global) !T {
             defer self.idx += 1;
 
             try self.registry.bind(writer, .{

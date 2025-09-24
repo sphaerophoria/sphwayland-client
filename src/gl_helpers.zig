@@ -1,5 +1,5 @@
 const std = @import("std");
-const gl = @import("gl.zig");
+const gl = @import("gl");
 
 pub const EglContext = struct {
     display: gl.EGLDisplay,
@@ -48,7 +48,7 @@ pub const EglContext = struct {
     }
 };
 
-fn debugCallback(_: gl.GLenum, _: gl.GLenum, _: gl.GLuint, _: gl.GLenum, length: gl.GLsizei, message: [*c]const gl.GLchar, _: ?*const anyopaque) callconv(.C) void {
+fn debugCallback(_: gl.GLenum, _: gl.GLenum, _: gl.GLuint, _: gl.GLenum, length: gl.GLsizei, message: [*c]const gl.GLchar, _: ?*const anyopaque) callconv(.c) void {
     std.log.debug("GL: {s}\n", .{message[0..@intCast(length)]});
 }
 

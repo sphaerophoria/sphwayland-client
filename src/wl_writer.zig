@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 
 pub const HeaderLE = packed struct { id: u32, op: u16, size: u16 };
 
-pub fn writeWlMessage(writer: anytype, elem: anytype, id: u32) !void {
+pub fn writeWlMessage(writer: *std.io.Writer, elem: anytype, id: u32) !void {
     var size: usize = @sizeOf(HeaderLE);
     inline for (std.meta.fields(@TypeOf(elem))) |field| {
         switch (field.type) {
@@ -27,7 +27,7 @@ pub fn writeWlMessage(writer: anytype, elem: anytype, id: u32) !void {
         .op = @TypeOf(elem).op,
         .size = @intCast(size),
     };
-    try writer.writeStruct(header);
+    try writer.writeStruct(header, .little);
 
     const endian = builtin.cpu.arch.endian();
     inline for (std.meta.fields(@TypeOf(elem))) |field| {
@@ -65,11 +65,11 @@ fn writeString(w: anytype, s: [:0]const u8) !void {
     try writeArray(w, s[0 .. s.len + 1]);
 }
 
-fn writeArray(w: anytype, s: []const u8) !void {
+fn writeArray(w: *std.Io.Writer, s: []const u8) !void {
     // null terminated
     try w.writeInt(u32, @intCast(s.len), .little);
     try w.writeAll(s);
     const written = 4 + s.len;
     const required_len = writtenArrayLen(s);
-    try w.writeByteNTimes(0, required_len - written);
+    try w.splatByteAll(0, required_len - written);
 }

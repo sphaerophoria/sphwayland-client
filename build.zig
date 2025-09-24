@@ -1,4 +1,5 @@
 const std = @import("std");
+const process_include_paths = @import("build/process_include_paths.zig");
 
 pub const BindingsGenerator = struct {
     b: *std.Build,
@@ -33,9 +34,11 @@ pub fn build(b: *std.Build) !void {
 
     const wlgen = b.addExecutable(.{
         .name = "wlgen",
-        .root_source_file = b.path("src/wlgen.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/wlgen.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     wlgen.linkLibC();
     b.installArtifact(wlgen);
@@ -61,6 +64,23 @@ pub fn build(b: *std.Build) !void {
         .wlgen = wlgen,
     };
 
+    const gl_zig = b.addTranslateC(.{
+        .root_source_file = b.path("src/gl.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    var include_it = try process_include_paths.IncludeIter.init(b.allocator);
+    while (include_it.next()) |p| {
+        gl_zig.addSystemIncludePath(std.Build.LazyPath{ .cwd_relative = p });
+    }
+    const gl = gl_zig.createModule();
+
+    const stbi_mod = b.addTranslateC(.{
+        .root_source_file = b.path("src/stb_image.h"),
+        .target = target,
+        .optimize = optimize,
+    }).createModule();
+
     const wayland_bindings = bindings_generator.generate(
         "wayland.zig",
         &.{
@@ -75,6 +95,7 @@ pub fn build(b: *std.Build) !void {
     });
     sphwayland.addImport("wl_writer", wl_writer_mod);
     sphwayland.addImport("wl_reader", wl_reader_mod);
+    sphwayland.addImport("gl", gl);
     sphwayland.addCSourceFile(.{
         .file = b.path("src/cmsg.c"),
     });
@@ -82,13 +103,17 @@ pub fn build(b: *std.Build) !void {
 
     const exe = b.addExecutable(.{
         .name = "sphwayland-client",
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file =  b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
 
     exe.linkSystemLibrary("GL");
     exe.linkSystemLibrary("EGL");
+    exe.root_module.addImport("gl", gl);
+    exe.root_module.addImport("stbi", stbi_mod);
     exe.addIncludePath(b.path("src"));
     exe.addCSourceFile(.{
         .file = b.path("src/stb_image.c"),

@@ -451,7 +451,7 @@ const WaylandXmlParser = struct {
     }
 };
 
-fn printWithUpperFirstChar(writer: anytype, s: []const u8) !void {
+fn printWithUpperFirstChar(writer: *std.Io.Writer, s: []const u8) !void {
     switch (s.len) {
         0 => return,
         1 => try writer.writeByte(std.ascii.toUpper(s[0])),
@@ -467,9 +467,7 @@ const SnakeToPascal = struct {
 
     pub fn format(
         self: *const SnakeToPascal,
-        comptime _: []const u8,
-        _: std.fmt.FormatOptions,
-        writer: anytype,
+        writer: *std.Io.Writer,
     ) !void {
         var it = std.mem.splitScalar(u8, self.name, '_');
         while (it.next()) |elem| {
@@ -487,9 +485,7 @@ const SnakeToCamel = struct {
 
     pub fn format(
         self: *const SnakeToCamel,
-        comptime _: []const u8,
-        _: std.fmt.FormatOptions,
-        writer: anytype,
+        writer: *std.io.Writer,
     ) !void {
         var it = std.mem.splitScalar(u8, self.name, '_');
         const first = it.next() orelse return;
@@ -532,243 +528,239 @@ fn anyEventCanBeParsed(interface: Interface) bool {
     return false;
 }
 
-fn ZigBindingsWriter(comptime Writer: type) type {
-    return struct {
-        writer: Writer,
+const ZigBindingsWriter = struct  {
+    writer: *std.Io.Writer,
 
-        const Self = @This();
+    fn init(writer: *std.Io.Writer)  ZigBindingsWriter {
+        return .{
+            .writer = writer,
+        };
+    }
 
-        fn writeImports(self: *Self) !void {
-            try self.writer.writeAll(
-                \\const std = @import("std");
-                \\const builtin = @import("builtin");
-                \\const Allocator = std.mem.Allocator;
-                \\const wlw = @import("wl_writer");
-                \\const wlr = @import("wl_reader");
-                \\const HeaderLE = wlw.HeaderLE;
-                \\
-                \\
-            );
-        }
+    fn writeImports(self: *ZigBindingsWriter) !void {
+        try self.writer.writeAll(
+            \\const std = @import("std");
+            \\const builtin = @import("builtin");
+            \\const Allocator = std.mem.Allocator;
+            \\const wlw = @import("wl_writer");
+            \\const wlr = @import("wl_reader");
+            \\const HeaderLE = wlw.HeaderLE;
+            \\
+            \\
+        );
+    }
 
-        fn writeInterfaceStart(self: *Self, interface: Interface) !void {
-            try self.writer.print(
-                \\pub const {s} = struct {{
-                \\    id: u32,
-                \\
-                \\
-            , .{snakeToPascal(interface.name)});
-        }
+    fn writeInterfaceStart(self: *ZigBindingsWriter, interface: Interface) !void {
+        try self.writer.print(
+            \\pub const {f} = struct {{
+            \\    id: u32,
+            \\
+            \\
+        , .{snakeToPascal(interface.name)});
+    }
 
-        fn writeInterfaceEnd(self: *Self) !void {
-            try self.writer.writeAll("};\n\n");
-        }
+    fn writeInterfaceEnd(self: *ZigBindingsWriter) !void {
+        try self.writer.writeAll("};\n\n");
+    }
 
-        fn writeInterfaceReqParams(self: *Self, req: Interface.RequestEvent, i: usize) !void {
-            try self.writer.print(
-                \\    pub const {s}Params = struct {{
-                \\        pub const op = {d};
-                \\
-            ,
-                .{ snakeToPascal(req.name), i },
-            );
+    fn writeInterfaceReqParams(self: *ZigBindingsWriter, req: Interface.RequestEvent, i: usize) !void {
+        try self.writer.print(
+            \\    pub const {f}Params = struct {{
+            \\        pub const op = {d};
+            \\
+        ,
+            .{ snakeToPascal(req.name), i },
+        );
 
-            for (req.args) |arg| {
-                if (arg.typ == .new_id and !arg.has_interface) {
-                    try self.writer.print(
-                        "        {s}_interface: [:0]const u8,\n",
-                        .{arg.name},
-                    );
-                    try self.writer.print(
-                        "        {s}_interface_version: u32,\n",
-                        .{arg.name},
-                    );
-                }
+        for (req.args) |arg| {
+            if (arg.typ == .new_id and !arg.has_interface) {
                 try self.writer.print(
-                    "        {s}: {s},\n",
-                    .{ arg.name, arg.typ.toZigTypeString().? },
+                    "        {s}_interface: [:0]const u8,\n",
+                    .{arg.name},
+                );
+                try self.writer.print(
+                    "        {s}_interface_version: u32,\n",
+                    .{arg.name},
                 );
             }
-            try self.writer.writeAll("    };\n\n");
+            try self.writer.print(
+                "        {s}: {s},\n",
+                .{ arg.name, arg.typ.toZigTypeString().? },
+            );
+        }
+        try self.writer.writeAll("    };\n\n");
+    }
+
+    fn writeInterfaceReqFn(self: *ZigBindingsWriter, interface: Interface, req: Interface.RequestEvent) !void {
+        try self.writer.print(
+            \\    pub fn {f}(self: *const {f}, writer: *std.Io.Writer, params: {f}Params) !void {{
+            \\        std.log.debug("Sending {s}::{s} {{any}} ", .{{ params }});
+            \\        try wlw.writeWlMessage(writer, params, self.id);
+            \\    }}
+            \\
+            \\
+        , .{
+            snakeToCamel(req.name),
+            snakeToPascal(interface.name),
+            snakeToPascal(req.name),
+            interface.name,
+            req.name,
+        });
+    }
+
+    fn writeInterfaceReq(self: *ZigBindingsWriter, interface: Interface, req: Interface.RequestEvent, i: usize) !void {
+        if (!allArgsHaveKnownType(req)) {
+            return;
         }
 
-        fn writeInterfaceReqFn(self: *Self, interface: Interface, req: Interface.RequestEvent) !void {
+        try self.writeInterfaceReqParams(req, i);
+        try self.writeInterfaceReqFn(interface, req);
+    }
+
+    fn writeEventsStart(self: *ZigBindingsWriter) !void {
+        try self.writer.writeAll(
+            \\    pub const Event = union(enum) {
+            \\
+        );
+    }
+
+    fn writeEventsEnd(self: *ZigBindingsWriter) !void {
+        try self.writer.writeAll(
+            \\    };
+            \\
+        );
+    }
+
+    fn writeEventType(self: *ZigBindingsWriter, event: Interface.RequestEvent) !void {
+        if (!allArgsHaveKnownType(event)) {
+            return;
+        }
+
+        try self.writer.print(
+            \\        pub const {f} = struct {{
+            \\
+        , .{snakeToPascal(event.name)});
+
+        for (event.args) |arg| {
+            if (arg.typ == .new_id and !arg.has_interface) {
+                try self.writer.print(
+                    "            {s}_interface: [:0]const u8,\n",
+                    .{arg.name},
+                );
+                try self.writer.print(
+                    "            {s}_interface_version: u32,\n",
+                    .{arg.name},
+                );
+            }
             try self.writer.print(
-                \\    pub fn {s}(self: *const {s}, writer: anytype, params: {s}Params) !void {{
-                \\        std.log.debug("Sending {s}::{s} {{any}} ", .{{ params }});
-                \\        try wlw.writeWlMessage(writer, params, self.id);
-                \\    }}
-                \\
+                "            {s}: {s},\n",
+                .{ arg.name, arg.typ.toZigTypeString().? },
+            );
+        }
+        try self.writer.writeAll("        };\n\n");
+    }
+
+    /// name: Name
+    fn writeEventField(self: *ZigBindingsWriter, event: Interface.RequestEvent) !void {
+        if (allArgsHaveKnownType(event)) {
+            try self.writer.print("        {s}: {f},\n", .{ dodgeReservedKeyword(event.name), snakeToPascal(event.name) });
+        } else {
+            try self.writer.print("        {s},\n", .{dodgeReservedKeyword(event.name)});
+        }
+    }
+
+    fn writeEventParseStart(self: *ZigBindingsWriter) !void {
+        try self.writer.writeAll(
+            \\        pub fn parse(op: u32, data: []const u8) !Event {
+            \\            return switch (op) {
+            \\
+        );
+    }
+
+    fn writeEventParseEnd(self: *ZigBindingsWriter, interface: Interface) !void {
+        try self.writer.print(
+            \\                else => {{
+            \\                    std.log.warn("Unknown {s} event {{d}}", .{{op}});
+            \\                    return error.UnknownEvent;
+            \\                }}
+            \\            }};
+            \\        }}
+            \\
+        ,
+            .{interface.name},
+        );
+    }
+
+    fn writeEventParseStatement(self: *ZigBindingsWriter, event: Interface.RequestEvent, i: usize) !void {
+        if (allArgsHaveKnownType(event)) {
+            try self.writer.print(
+                \\               {d} => .{{ .{s} = try wlr.parseDataResponse({f}, data) }},
                 \\
             , .{
-                snakeToCamel(req.name),
-                snakeToPascal(interface.name),
-                snakeToPascal(req.name),
-                interface.name,
-                req.name,
+                i,
+                dodgeReservedKeyword(event.name),
+                snakeToPascal(event.name),
+            });
+        } else {
+            try self.writer.print(
+                \\               {d} => .{s},
+                \\
+            , .{
+                i,
+                dodgeReservedKeyword(event.name),
             });
         }
+    }
 
-        fn writeInterfaceReq(self: *Self, interface: Interface, req: Interface.RequestEvent, i: usize) !void {
-            if (!allArgsHaveKnownType(req)) {
-                return;
+    fn writeEventUnion(self: *ZigBindingsWriter, interfaces: []const Interface) !void {
+        try self.writer.writeAll("pub const WaylandEventType = enum {\n");
+        for (interfaces) |interface| {
+            try self.writer.print("    {s},\n", .{interface.name});
+        }
+        try self.writer.writeAll("};\n\n");
+
+        try self.writer.writeAll("pub const WaylandEvent = union(WaylandEventType) {\n");
+        for (interfaces) |interface| {
+            try self.writer.print("    {s}: {f}.Event,\n", .{ interface.name, snakeToPascal(interface.name) });
+        }
+        try self.writer.writeAll("};\n\n");
+    }
+
+    fn writeInterface(self: *ZigBindingsWriter, interface: Interface) !void {
+        try self.writeInterfaceStart(interface);
+
+        for (interface.requests, 0..) |req, i| {
+            try self.writeInterfaceReq(interface, req, i);
+        }
+
+        if (interface.events.len == 0) {
+            try self.writer.writeAll("    pub const Event = struct {};");
+        } else {
+            try self.writeEventsStart();
+
+            for (interface.events) |event| {
+                try self.writeEventField(event);
             }
 
-            try self.writeInterfaceReqParams(req, i);
-            try self.writeInterfaceReqFn(interface, req);
-        }
+            try self.writer.writeByte('\n');
 
-        fn writeEventsStart(self: *Self) !void {
-            try self.writer.writeAll(
-                \\    pub const Event = union(enum) {
-                \\
-            );
-        }
-
-        fn writeEventsEnd(self: *Self) !void {
-            try self.writer.writeAll(
-                \\    };
-                \\
-            );
-        }
-
-        fn writeEventType(self: *Self, event: Interface.RequestEvent) !void {
-            if (!allArgsHaveKnownType(event)) {
-                return;
+            for (interface.events) |event| {
+                try self.writeEventType(event);
             }
 
-            try self.writer.print(
-                \\        pub const {s} = struct {{
-                \\
-            , .{snakeToPascal(event.name)});
-
-            for (event.args) |arg| {
-                if (arg.typ == .new_id and !arg.has_interface) {
-                    try self.writer.print(
-                        "            {s}_interface: [:0]const u8,\n",
-                        .{arg.name},
-                    );
-                    try self.writer.print(
-                        "            {s}_interface_version: u32,\n",
-                        .{arg.name},
-                    );
+            if (anyEventCanBeParsed(interface)) {
+                try self.writeEventParseStart();
+                for (interface.events, 0..) |event, i| {
+                    try self.writeEventParseStatement(event, i);
                 }
-                try self.writer.print(
-                    "            {s}: {s},\n",
-                    .{ arg.name, arg.typ.toZigTypeString().? },
-                );
-            }
-            try self.writer.writeAll("        };\n\n");
-        }
-
-        /// name: Name
-        fn writeEventField(self: *Self, event: Interface.RequestEvent) !void {
-            if (allArgsHaveKnownType(event)) {
-                try self.writer.print("        {s}: {s},\n", .{ dodgeReservedKeyword(event.name), snakeToPascal(event.name) });
-            } else {
-                try self.writer.print("        {s},\n", .{dodgeReservedKeyword(event.name)});
-            }
-        }
-
-        fn writeEventParseStart(self: *Self) !void {
-            try self.writer.writeAll(
-                \\        pub fn parse(op: u32, data: []const u8) !Event {
-                \\            return switch (op) {
-                \\
-            );
-        }
-
-        fn writeEventParseEnd(self: *Self, interface: Interface) !void {
-            try self.writer.print(
-                \\                else => {{
-                \\                    std.log.warn("Unknown {s} event {{d}}", .{{op}});
-                \\                    return error.UnknownEvent;
-                \\                }}
-                \\            }};
-                \\        }}
-                \\
-            ,
-                .{interface.name},
-            );
-        }
-
-        fn writeEventParseStatement(self: *Self, event: Interface.RequestEvent, i: usize) !void {
-            if (allArgsHaveKnownType(event)) {
-                try self.writer.print(
-                    \\               {d} => .{{ .{s} = try wlr.parseDataResponse({s}, data) }},
-                    \\
-                , .{
-                    i,
-                    dodgeReservedKeyword(event.name),
-                    snakeToPascal(event.name),
-                });
-            } else {
-                try self.writer.print(
-                    \\               {d} => .{s},
-                    \\
-                , .{
-                    i,
-                    dodgeReservedKeyword(event.name),
-                });
-            }
-        }
-
-        fn writeEventUnion(self: *Self, interfaces: []const Interface) !void {
-            try self.writer.writeAll("pub const WaylandEventType = enum {\n");
-            for (interfaces) |interface| {
-                try self.writer.print("    {s},\n", .{interface.name});
-            }
-            try self.writer.writeAll("};\n\n");
-
-            try self.writer.writeAll("pub const WaylandEvent = union(WaylandEventType) {\n");
-            for (interfaces) |interface| {
-                try self.writer.print("    {s}: {s}.Event,\n", .{ interface.name, snakeToPascal(interface.name) });
-            }
-            try self.writer.writeAll("};\n\n");
-        }
-
-        fn writeInterface(self: *Self, interface: Interface) !void {
-            try self.writeInterfaceStart(interface);
-
-            for (interface.requests, 0..) |req, i| {
-                try self.writeInterfaceReq(interface, req, i);
+                try self.writeEventParseEnd(interface);
             }
 
-            if (interface.events.len == 0) {
-                try self.writer.writeAll("    pub const Event = struct {};");
-            } else {
-                try self.writeEventsStart();
-
-                for (interface.events) |event| {
-                    try self.writeEventField(event);
-                }
-
-                try self.writer.writeByte('\n');
-
-                for (interface.events) |event| {
-                    try self.writeEventType(event);
-                }
-
-                if (anyEventCanBeParsed(interface)) {
-                    try self.writeEventParseStart();
-                    for (interface.events, 0..) |event, i| {
-                        try self.writeEventParseStatement(event, i);
-                    }
-                    try self.writeEventParseEnd(interface);
-                }
-
-                try self.writeEventsEnd();
-            }
-            try self.writeInterfaceEnd();
+            try self.writeEventsEnd();
         }
-    };
-}
-
-fn zigBindingsWriter(writer: anytype) ZigBindingsWriter(@TypeOf(writer)) {
-    return .{
-        .writer = writer,
-    };
-}
+        try self.writeInterfaceEnd();
+    }
+};
 
 fn parseWaylandXml(alloc: Allocator, wayland_xml_path: []const u8) ![]Interface {
     var wayland_parser = WaylandXmlParser{
@@ -820,22 +812,22 @@ pub fn main() !void {
     const output_file = try std.fs.cwd().createFile(output_path, .{});
     defer output_file.close();
 
-    const output_writer = output_file.writer();
-    var buffered_output = std.io.bufferedWriter(output_writer);
+    var output_buf: [4096]u8 = undefined;
+    var output_writer = output_file.writer(&output_buf);
 
-    var zig_writer = zigBindingsWriter(buffered_output.writer());
+    var zig_writer = ZigBindingsWriter.init(&output_writer.interface);
     try zig_writer.writeImports();
 
-    var interfaces = std.ArrayList(Interface).init(alloc);
+    var interfaces = std.ArrayList(Interface){};
     defer {
         for (interfaces.items) |*interface| interface.deinit(alloc);
-        interfaces.deinit();
+        interfaces.deinit(alloc);
     }
     for (args[1 .. args.len - 1]) |wayland_xml_path| {
         const xml_interfaces = try parseWaylandXml(alloc, wayland_xml_path);
         defer alloc.free(xml_interfaces);
 
-        try interfaces.appendSlice(xml_interfaces);
+        try interfaces.appendSlice(alloc, xml_interfaces);
     }
 
     try zig_writer.writeEventUnion(interfaces.items);
@@ -844,5 +836,5 @@ pub fn main() !void {
         try zig_writer.writeInterface(interface);
     }
 
-    try buffered_output.flush();
+    try output_writer.interface.flush();
 }

@@ -1,8 +1,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const gl = @import("gl.zig");
-const stbi = @import("stbi.zig");
+const gl = @import("gl");
+const stbi = @import("stbi");
 
 const ModelRenderer = @This();
 
@@ -313,14 +313,14 @@ const Model = struct {
     fn load(alloc: Allocator, data: []const u8) !Model {
         var line_it = std.mem.splitScalar(u8, data, '\n');
 
-        var verts = std.ArrayList(Vert).init(alloc);
-        defer verts.deinit();
+        var verts = std.ArrayList(Vert){};
+        defer verts.deinit(alloc);
 
-        var uvs = std.ArrayList(Uv).init(alloc);
-        defer uvs.deinit();
+        var uvs = std.ArrayList(Uv){};
+        defer uvs.deinit(alloc);
 
-        var faces = std.ArrayList(Face).init(alloc);
-        defer faces.deinit();
+        var faces = std.ArrayList(Face){};
+        defer faces.deinit(alloc);
 
         while (line_it.next()) |line| {
             if (std.mem.startsWith(u8, line, "v ")) {
@@ -333,7 +333,7 @@ const Model = struct {
                     .z = try nextAsF32(&vert_it),
                 };
 
-                try verts.append(vert);
+                try verts.append(alloc, vert);
 
                 if (vert_it.next()) |_| {
                     std.log.warn("Unexpected 4th vertex dimension", .{});
@@ -347,7 +347,7 @@ const Model = struct {
                     .v = try nextAsF32(&uv_it),
                 };
 
-                try uvs.append(uv);
+                try uvs.append(alloc, uv);
 
                 if (uv_it.next()) |_| {
                     std.log.warn("Unexpected 3rd uv dimension", .{});
@@ -373,7 +373,7 @@ const Model = struct {
                     uv_ids[i] = uv_id;
                 }
 
-                try faces.append(Face{
+                try faces.append(alloc, Face{
                     .vert_ids = vert_ids,
                     .uv_ids = uv_ids,
                 });
@@ -386,9 +386,9 @@ const Model = struct {
         }
 
         return .{
-            .verts = try verts.toOwnedSlice(),
-            .uvs = try uvs.toOwnedSlice(),
-            .faces = try faces.toOwnedSlice(),
+            .verts = try verts.toOwnedSlice(alloc),
+            .uvs = try uvs.toOwnedSlice(alloc),
+            .faces = try faces.toOwnedSlice(alloc),
         };
     }
 };
@@ -405,14 +405,14 @@ const BufferPair = struct {
 
 fn bindModel(alloc: Allocator, model: Model) !BufferPair {
     var vertex_buffer = try std.ArrayList(f32).initCapacity(alloc, model.faces.len * 15);
-    defer vertex_buffer.deinit();
+    defer vertex_buffer.deinit(alloc);
 
     for (model.faces) |face| {
         for (0..3) |i| {
             const vert = model.verts[face.vert_ids[i]];
             const uv = model.uvs[face.uv_ids[i]];
 
-            try vertex_buffer.appendSlice(&.{ vert.x, vert.y, vert.z, uv.u, uv.v });
+            try vertex_buffer.appendSlice(alloc, &.{ vert.x, vert.y, vert.z, uv.u, uv.v });
         }
     }
     std.debug.assert(vertex_buffer.items.len == model.faces.len * 15);

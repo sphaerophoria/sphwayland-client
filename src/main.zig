@@ -5,7 +5,7 @@ const sphwayland = @import("sphwayland");
 const wlb = @import("wl_bindings");
 const ModelRenderer = @import("ModelRenderer.zig");
 const gl_helpers = @import("gl_helpers.zig");
-const gl = @import("gl.zig");
+const gl = @import("gl");
 
 pub const std_options = std.Options{
     .log_level = .warn,
@@ -297,9 +297,9 @@ fn createGlBackedBuffers(
 
         const zwp_params = gl_helpers.makeTextureFileDescriptor(framebuffers[idx].color, egl_context.display, egl_context.context);
 
-        var to_send = std.ArrayList(u8).init(alloc);
+        var to_send = std.Io.Writer.Allocating.init(alloc);
         defer to_send.deinit();
-        try buffer_params.add(to_send.writer(), .{
+        try buffer_params.add(&to_send.writer, .{
             .fd = {}, // out of band,
             .plane_idx = 0, // assumed single plane
             .offset = @intCast(zwp_params.offset),
@@ -308,7 +308,7 @@ fn createGlBackedBuffers(
             .modifier_lo = @truncate(zwp_params.modifiers),
         });
 
-        try sphwayland.sendMessageWithFdAttachment(alloc, client.stream, to_send.items, zwp_params.fd);
+        try sphwayland.sendMessageWithFdAttachment(alloc, client.stream, to_send.written(), zwp_params.fd);
 
         try buffer_params.create(writer, .{
             .width = GlBuffers.width,

@@ -1,5 +1,5 @@
 .{
-    .name = "sphwayland",
+    .name = .sphwayland,
     .minimum_zig_version = "0.13.0",
     .version = "0.0.1",
     .dependencies = .{},
@@ -8,4 +8,5 @@
         "build.zig.zon",
         "src",
     },
+    .fingerprint = 0x9ab894160fd36627,
 }
