@@ -542,9 +542,8 @@ const ZigBindingsWriter = struct  {
             \\const std = @import("std");
             \\const builtin = @import("builtin");
             \\const Allocator = std.mem.Allocator;
-            \\const wlw = @import("wl_writer");
-            \\const wlr = @import("wl_reader");
-            \\const HeaderLE = wlw.HeaderLE;
+            \\const wlio = @import("wlio");
+            \\const HeaderLE = wlio.HeaderLE;
             \\
             \\
         );
@@ -595,7 +594,7 @@ const ZigBindingsWriter = struct  {
         try self.writer.print(
             \\    pub fn {f}(self: *const {f}, writer: *std.Io.Writer, params: {f}Params) !void {{
             \\        std.log.debug("Sending {s}::{s} {{any}} ", .{{ params }});
-            \\        try wlw.writeWlMessage(writer, params, self.id);
+            \\        try wlio.writeWlMessage(writer, params, self.id);
             \\    }}
             \\
             \\
@@ -694,7 +693,7 @@ const ZigBindingsWriter = struct  {
     fn writeEventParseStatement(self: *ZigBindingsWriter, event: Interface.RequestEvent, i: usize) !void {
         if (allArgsHaveKnownType(event)) {
             try self.writer.print(
-                \\               {d} => .{{ .{s} = try wlr.parseDataResponse({f}, data) }},
+                \\               {d} => .{{ .{s} = try wlio.parseDataResponse({f}, data) }},
                 \\
             , .{
                 i,

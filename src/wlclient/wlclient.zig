@@ -1,8 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const wlw = @import("wl_writer");
-const wlr = @import("wl_reader");
-const HeaderLE = wlw.HeaderLE;
+const wlio = @import("wlio");
+const HeaderLE = wlio.HeaderLE;
 const cmsg = @cImport({
     @cInclude("cmsg.h");
 });
@@ -260,7 +259,7 @@ pub fn EventIt(comptime Bindings: type) type {
             }
         }
 
-        fn wait(self: *Self) !void {
+        pub fn wait(self: *Self) !void {
             var num_ready: usize = 0;
             while (num_ready == 0) {
                 var pollfd = [1]std.posix.pollfd{.{
@@ -273,7 +272,7 @@ pub fn EventIt(comptime Bindings: type) type {
         }
 
         fn getBufferedEvent(self: *Self) !?Event(Bindings) {
-            const header_end = self.client.event_buf.front + @sizeOf(wlw.HeaderLE);
+            const header_end = self.client.event_buf.front + @sizeOf(wlio.HeaderLE);
             if (header_end > self.client.event_buf.back) {
                 return null;
             }
