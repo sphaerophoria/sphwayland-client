@@ -69,11 +69,19 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
+    const gbm_zig = b.addTranslateC(.{
+        .root_source_file = b.path("src/gbm.h"),
+        .target = target,
+        .optimize = optimize,
+    });
     var include_it = try process_include_paths.IncludeIter.init(b.allocator);
     while (include_it.next()) |p| {
         gl_zig.addSystemIncludePath(std.Build.LazyPath{ .cwd_relative = p });
+        gbm_zig.addSystemIncludePath(std.Build.LazyPath { .cwd_relative = p });
     }
     const gl = gl_zig.createModule();
+    const gbm = gbm_zig.createModule();
+
 
     const stbi_mod = b.addTranslateC(.{
         .root_source_file = b.path("src/stb_image.h"),
@@ -112,8 +120,10 @@ pub fn build(b: *std.Build) !void {
 
     exe.linkSystemLibrary("GL");
     exe.linkSystemLibrary("EGL");
+    exe.linkSystemLibrary("gbm");
     exe.root_module.addImport("gl", gl);
     exe.root_module.addImport("stbi", stbi_mod);
+    exe.root_module.addImport("gbm", gbm);
     exe.addIncludePath(b.path("src"));
     exe.addCSourceFile(.{
         .file = b.path("src/stb_image.c"),

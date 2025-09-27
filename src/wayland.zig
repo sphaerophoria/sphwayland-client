@@ -206,16 +206,18 @@ const DoubleEndedBuf = struct {
     }
 };
 
+pub fn Event(comptime Bindings: type) type {
+    return struct {
+        object_id: u32,
+        event: Bindings.WaylandEvent,
+    };
+}
+
 pub fn EventIt(comptime Bindings: type) type {
     return struct {
         client: *Client(Bindings),
 
         const Self = @This();
-
-        pub const Event = struct {
-            object_id: u32,
-            event: Bindings.WaylandEvent,
-        };
 
         pub fn init(client: *Client(Bindings)) Self {
             return .{
@@ -235,7 +237,7 @@ pub fn EventIt(comptime Bindings: type) type {
             self.client.event_buf.back += num_bytes_read;
         }
 
-        pub fn getEventBlocking(self: *Self) !Event {
+        pub fn getEventBlocking(self: *Self) !Event(Bindings) {
             while (true) {
                 if (try self.getAvailableEvent()) |v| {
                     return v;
@@ -244,7 +246,7 @@ pub fn EventIt(comptime Bindings: type) type {
             }
         }
 
-        pub fn getAvailableEvent(self: *Self) !?Event {
+        pub fn getAvailableEvent(self: *Self) !?Event(Bindings) {
             while (true) {
                 if (try self.getBufferedEvent()) |v| {
                     return v;
@@ -270,7 +272,7 @@ pub fn EventIt(comptime Bindings: type) type {
             }
         }
 
-        fn getBufferedEvent(self: *Self) !?Event {
+        fn getBufferedEvent(self: *Self) !?Event(Bindings) {
             const header_end = self.client.event_buf.front + @sizeOf(wlw.HeaderLE);
             if (header_end > self.client.event_buf.back) {
                 return null;

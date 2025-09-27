@@ -16,6 +16,7 @@ pkgs.mkShell {
     wayland-protocols
     libGL
     mesa
+    libgbm
   ];
 }
 

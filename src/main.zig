@@ -79,14 +79,18 @@ fn bindInterfaces(client: *sphwayland.Client(wlb)) !BoundInterfaces {
 const App = struct {
     compositor: wlb.WlCompositor,
     xdg_wm_base: wlb.XdgWmBase,
+    dmabuf: wlb.ZwpLinuxDmabufV1,
     wl_surface: wlb.WlSurface,
     xdg_surface: wlb.XdgSurface,
     client: *sphwayland.Client(wlb),
     frame_callback: wlb.WlCallback,
-    gl_buffers: *GlBuffers,
     model_renderer: ModelRenderer,
 
-    pub fn init(alloc: Allocator, client: *sphwayland.Client(wlb), gl_buffers: *GlBuffers, bound_interfaces: BoundInterfaces) !App {
+    egl_ctx: gl_helpers.EglContext,
+    gbm_ctx: gl_helpers.GbmContext,
+    compositor_owned_buffers: std.AutoHashMap(u32, gl_helpers.GbmContext.Buffer),
+
+    pub fn init(alloc: Allocator, egl_ctx: gl_helpers.EglContext, gbm_ctx: gl_helpers.GbmContext, client: *sphwayland.Client(wlb), bound_interfaces: BoundInterfaces) !App {
         std.log.debug("Initializing app", .{});
         const writer = client.writer();
 
@@ -124,20 +128,115 @@ const App = struct {
             .compositor = bound_interfaces.compositor,
             .xdg_wm_base = bound_interfaces.xdg_wm_base,
             .wl_surface = wl_surface,
+            .dmabuf = bound_interfaces.dmabuf,
             .xdg_surface = xdg_surface,
             .frame_callback = frame_callback,
             .client = client,
-            .gl_buffers = gl_buffers,
             .model_renderer = model_renderer,
+            .egl_ctx = egl_ctx,
+            .gbm_ctx = gbm_ctx,
+            .compositor_owned_buffers = .init(alloc),
         };
     }
 
     fn deinit(self: *App) void {
+        self.compositor_owned_buffers.deinit();
         self.model_renderer.deinit();
     }
 
-    fn handleEvent(self: *App, event: wlb.WaylandEvent) !bool {
-        switch (event) {
+    fn addBufferObjectToBufParams(
+        self: *App,
+        alloc: std.mem.Allocator,
+        front_buf: gl_helpers.GbmContext.Buffer,
+        params: wlb.ZwpLinuxBufferParamsV1,
+    ) !void {
+        var add_writer = std.Io.Writer.Allocating.init(alloc);
+        defer add_writer.deinit();
+
+        const modifier = front_buf.modifier();
+        try params.add(&add_writer.writer, .{
+            // Out of band
+            .fd = {},
+            .plane_idx = 0, // assumed single plane
+            .offset = front_buf.offset(),
+            .stride = front_buf.stride(),
+            .modifier_hi = @truncate(modifier >> 32),
+            .modifier_lo = @truncate(modifier),
+        });
+
+
+        const buf_fd = front_buf.fd();
+        try sphwayland.sendMessageWithFdAttachment(
+            alloc,
+            self.client.stream,
+            add_writer.written(),
+            @bitCast(buf_fd),
+        );
+    }
+
+    fn render(self: *App, alloc: Allocator) !void {
+        gl.glViewport(
+            0, 0,
+            try self.egl_ctx.getWidth(),
+            try self.egl_ctx.getHeight(),
+        );
+
+        gl.glClearColor(0.4, 0.4, 0.4, 1.0);
+        gl.glClearDepth(1.0);
+        gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT);
+
+        self.model_renderer.rotate(0.01, 0.001);
+        self.model_renderer.render(1.0);
+
+        try self.egl_ctx.swapBuffers();
+
+        const front_buf = try self.gbm_ctx.lockFront();
+
+        // front buffer is owned by us until it is committed to a
+        // wl_surface, then it is owned by the compositor
+        errdefer self.gbm_ctx.unlock(front_buf);
+
+        const params = try self.client.newId(wlb.ZwpLinuxBufferParamsV1);
+        try self.dmabuf.createParams(self.client.writer(), .{
+            .params_id = params.id,
+        });
+
+        try self.addBufferObjectToBufParams(alloc, front_buf, params);
+
+        const wl_buf = try self.client.newId(wlb.WlBuffer);
+        try params.createImmed(self.client.writer(), .{
+            .buffer_id = wl_buf.id,
+            .width = std.math.cast(i32, front_buf.width()) orelse return error.InvalidWidth,
+            .height = std.math.cast(i32, front_buf.height()) orelse return error.InvalidHeight,
+            .format = front_buf.format(),
+            .flags = 0,
+        });
+
+
+        try self.wl_surface.attach(self.client.writer(), .{
+            .buffer = wl_buf.id,
+            .x = 0,
+            .y = 0,
+        });
+
+        try self.wl_surface.damageBuffer(self.client.writer(), .{
+            .x = 0,
+            .y = 0,
+            .width = std.math.maxInt(i32),
+            .height = std.math.maxInt(i32),
+        });
+
+        try self.compositor_owned_buffers.put(wl_buf.id, front_buf);
+        errdefer _ = self.compositor_owned_buffers.remove(wl_buf.id);
+
+        try self.wl_surface.commit(self.client.writer(), .{});
+
+        // Commit has to be the last call in this scope, or a bunch of
+        // errdefers will be incorrect
+    }
+
+    fn handleEvent(self: *App, alloc: Allocator, event: sphwayland.Event(wlb)) !bool {
+        switch (event.event) {
             .wl_display => |parsed| {
                 switch (parsed) {
                     .err => |err| sphwayland.logWaylandErr(err),
@@ -157,14 +256,7 @@ const App = struct {
                 });
                 try self.wl_surface.commit(self.client.writer(), .{});
 
-                const wl_buf = self.gl_buffers.getActiveWlBuffer();
-                try self.wl_surface.attach(self.client.writer(), .{
-                    .buffer = wl_buf.id,
-                    .x = 0,
-                    .y = 0,
-                });
-                self.gl_buffers.swap();
-                try self.wl_surface.commit(self.client.writer(), .{});
+                try self.render(alloc);
             },
             .xdg_wm_base => |parsed| {
                 try self.xdg_wm_base.pong(self.client.writer(), .{
@@ -184,40 +276,22 @@ const App = struct {
             .wl_callback => |parsed| {
                 //std.debug.assert(self.frame_callback.id == event.header.id);
                 std.debug.assert(parsed == .done);
+                try self.render(alloc);
 
-                const fbo = self.gl_buffers.getActiveFramebuffer();
-                gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, fbo);
-                gl.glViewport(0, 0, GlBuffers.width, GlBuffers.height);
-
-                gl.glClearColor(0.4, 0.4, 0.4, 1.0);
-                gl.glClearDepth(1.0);
-                gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT);
-
-                self.model_renderer.rotate(0.01, 0.001);
-                self.model_renderer.render(1.0);
-
-                // Unlike in normal opengl, nothing is telling the system that
-                // we are actually using this texture. We need to flush the
-                // draw calls before asking the compositor to draw our texture
-                // for us
-                gl.glFlush();
-
-                const wl_buf = self.gl_buffers.getActiveWlBuffer();
-                try self.wl_surface.attach(self.client.writer(), .{
-                    .buffer = wl_buf.id,
-                    .x = 0,
-                    .y = 0,
-                });
-                self.gl_buffers.swap();
-                try self.wl_surface.damageBuffer(self.client.writer(), .{
-                    .x = 0,
-                    .y = 0,
-                    .width = std.math.maxInt(i32),
-                    .height = std.math.maxInt(i32),
-                });
-                try self.wl_surface.commit(self.client.writer(), .{});
             },
-            else => sphwayland.logUnusedEvent(event),
+            .wl_buffer => |parsed| {
+                switch (parsed) {
+                    .release => blk: {
+                        const gbm_handle = self.compositor_owned_buffers.get(event.object_id) orelse {
+                            std.log.err("Got release event for unknown buffer", .{});
+                            break :blk;
+                        };
+                        self.gbm_ctx.unlock(gbm_handle);
+                    },
+
+                }
+            },
+            else => sphwayland.logUnusedEvent(event.event),
         }
         return false;
     }
@@ -276,56 +350,6 @@ fn waitForZwpLinuxWlBuffer(client: *sphwayland.Client(wlb)) !wlb.WlBuffer {
     }
 }
 
-fn createGlBackedBuffers(
-    alloc: Allocator,
-    egl_context: gl_helpers.EglContext,
-    client: *sphwayland.Client(wlb),
-    bound_interfaces: BoundInterfaces,
-) !GlBuffers {
-    const writer = client.writer();
-
-    var framebuffers: [2]gl_helpers.FrameBuffer = undefined;
-    var wl_buffers: [2]wlb.WlBuffer = undefined;
-
-    for (0..2) |idx| {
-        const buffer_params = try client.newId(wlb.ZwpLinuxBufferParamsV1);
-        try bound_interfaces.dmabuf.createParams(writer, .{
-            .params_id = buffer_params.id,
-        });
-
-        framebuffers[idx] = gl_helpers.makeFarmeBuffer(GlBuffers.width, GlBuffers.height);
-
-        const zwp_params = gl_helpers.makeTextureFileDescriptor(framebuffers[idx].color, egl_context.display, egl_context.context);
-
-        var to_send = std.Io.Writer.Allocating.init(alloc);
-        defer to_send.deinit();
-        try buffer_params.add(&to_send.writer, .{
-            .fd = {}, // out of band,
-            .plane_idx = 0, // assumed single plane
-            .offset = @intCast(zwp_params.offset),
-            .stride = @intCast(zwp_params.stride),
-            .modifier_hi = @intCast(zwp_params.modifiers >> 32),
-            .modifier_lo = @truncate(zwp_params.modifiers),
-        });
-
-        try sphwayland.sendMessageWithFdAttachment(alloc, client.stream, to_send.written(), zwp_params.fd);
-
-        try buffer_params.create(writer, .{
-            .width = GlBuffers.width,
-            .height = GlBuffers.height,
-            .format = @bitCast(zwp_params.fourcc),
-            .flags = 0,
-        });
-
-        wl_buffers[idx] = try waitForZwpLinuxWlBuffer(client);
-    }
-
-    return .{
-        .framebuffers = framebuffers,
-        .wl_buffers = wl_buffers,
-    };
-}
-
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -337,20 +361,21 @@ pub fn main() !void {
 
     const bound_interfaces = try bindInterfaces(&client);
 
-    var egl_context = try gl_helpers.EglContext.init();
+    var gbm_context = try gl_helpers.GbmContext.init(640, 480);
+    defer gbm_context.deinit();
+
+    var egl_context = try gl_helpers.EglContext.init(alloc, gbm_context);
     defer egl_context.deinit();
+
     gl_helpers.initializeGlParams();
 
-    var gl_buffers = try createGlBackedBuffers(alloc, egl_context, &client, bound_interfaces);
-    defer gl_buffers.deinit();
-
-    var app = try App.init(alloc, &client, &gl_buffers, bound_interfaces);
+    var app = try App.init(alloc, egl_context, gbm_context, &client, bound_interfaces);
     defer app.deinit();
     var it = client.eventIt();
 
     while (true) {
         const event = try it.getEventBlocking();
-        const close = try app.handleEvent(event.event);
+        const close = try app.handleEvent(alloc, event);
         if (close) return;
     }
 }
