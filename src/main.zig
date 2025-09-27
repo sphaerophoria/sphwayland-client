@@ -112,13 +112,6 @@ const App = struct {
             .toplevel = toplevel.id,
         });
 
-        try wl_surface.attach(writer, .{
-            .buffer = gl_buffers.getActiveWlBuffer().id,
-            .x = 0,
-            .y = 0,
-        });
-        gl_buffers.swap();
-
         try wl_surface.commit(writer, .{});
 
         const frame_callback = try client.newId(wlb.WlCallback);
@@ -162,6 +155,15 @@ const App = struct {
                 try self.xdg_surface.ackConfigure(self.client.writer(), .{
                     .serial = parsed.configure.serial,
                 });
+                try self.wl_surface.commit(self.client.writer(), .{});
+
+                const wl_buf = self.gl_buffers.getActiveWlBuffer();
+                try self.wl_surface.attach(self.client.writer(), .{
+                    .buffer = wl_buf.id,
+                    .x = 0,
+                    .y = 0,
+                });
+                self.gl_buffers.swap();
                 try self.wl_surface.commit(self.client.writer(), .{});
             },
             .xdg_wm_base => |parsed| {
@@ -312,7 +314,7 @@ fn createGlBackedBuffers(
             .width = GlBuffers.width,
             .height = GlBuffers.height,
             .format = @bitCast(zwp_params.fourcc),
-            .flags = 1,
+            .flags = 0,
         });
 
         wl_buffers[idx] = try waitForZwpLinuxWlBuffer(client);
