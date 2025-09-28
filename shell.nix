@@ -17,6 +17,7 @@ pkgs.mkShell {
     libGL
     mesa
     libgbm
+    libdrm
   ];
 }
 

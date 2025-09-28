@@ -203,7 +203,6 @@ pub const Window = struct {
 
         const buf_fd = front_buf.fd();
         try wlclient.sendMessageWithFdAttachment(
-            alloc,
             self.client.stream,
             add_writer.written(),
             @bitCast(buf_fd),

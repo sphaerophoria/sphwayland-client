@@ -39,7 +39,7 @@ pub const GbmContext = struct {
 
     };
 
-    const format = c.GBM_FORMAT_ARGB8888;
+    const format = c.GBM_FORMAT_XRGB8888;
 
     pub fn init(init_width: u32, init_height: u32,) !GbmContext {
         // Would be nice if user could choose
