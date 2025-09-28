@@ -2,7 +2,11 @@
     .name = .sphwayland,
     .minimum_zig_version = "0.13.0",
     .version = "0.0.1",
-    .dependencies = .{},
+    .dependencies = .{
+        .sphtud = .{
+            .path = "sphtud",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",

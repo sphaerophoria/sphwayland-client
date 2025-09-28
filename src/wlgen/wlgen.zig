@@ -518,8 +518,8 @@ fn dodgeReservedKeyword(name: []const u8) []const u8 {
     return name;
 }
 
-fn anyEventCanBeParsed(interface: Interface) bool {
-    for (interface.events) |event| {
+fn anyEventCanBeParsed(incoming: []const Interface.RequestEvent) bool {
+    for (incoming) |event| {
         if (allArgsHaveKnownType(event)) {
             return true;
         }
@@ -549,13 +549,13 @@ const ZigBindingsWriter = struct {
         );
     }
 
-    fn writeInterfaceStart(self: *ZigBindingsWriter, interface: Interface) !void {
+    fn writeInterfaceStart(self: *ZigBindingsWriter, interface_name: []const u8) !void {
         try self.writer.print(
             \\pub const {f} = struct {{
             \\    id: u32,
             \\
             \\
-        , .{snakeToPascal(interface.name)});
+        , .{snakeToPascal(interface_name)});
     }
 
     fn writeInterfaceEnd(self: *ZigBindingsWriter) !void {
@@ -590,7 +590,7 @@ const ZigBindingsWriter = struct {
         try self.writer.writeAll("    };\n\n");
     }
 
-    fn writeInterfaceReqFn(self: *ZigBindingsWriter, interface: Interface, req: Interface.RequestEvent) !void {
+    fn writeInterfaceReqFn(self: *ZigBindingsWriter, interface_name: []const u8, req: Interface.RequestEvent) !void {
         try self.writer.print(
             \\    pub fn {f}(self: *const {f}, writer: *std.Io.Writer, params: {f}Params) !void {{
             \\        std.log.debug("Sending {s}::{s} {{any}} ", .{{ params }});
@@ -599,26 +599,26 @@ const ZigBindingsWriter = struct {
             \\
             \\
         , .{
-            snakeToCamel(req.name),
-            snakeToPascal(interface.name),
+            snakeToCamel(dodgeReservedKeyword(req.name)),
+            snakeToPascal(interface_name),
             snakeToPascal(req.name),
-            interface.name,
+            interface_name,
             req.name,
         });
     }
 
-    fn writeInterfaceReq(self: *ZigBindingsWriter, interface: Interface, req: Interface.RequestEvent, i: usize) !void {
+    fn writeInterfaceReq(self: *ZigBindingsWriter, interface_name: []const u8, req: Interface.RequestEvent, i: usize) !void {
         if (!allArgsHaveKnownType(req)) {
             return;
         }
 
         try self.writeInterfaceReqParams(req, i);
-        try self.writeInterfaceReqFn(interface, req);
+        try self.writeInterfaceReqFn(interface_name, req);
     }
 
-    fn writeEventsStart(self: *ZigBindingsWriter) !void {
+    fn writeIncomingStart(self: *ZigBindingsWriter) !void {
         try self.writer.writeAll(
-            \\    pub const Event = union(enum) {
+            \\    pub const IncomingMessage = union(enum) {
             \\
         );
     }
@@ -630,7 +630,7 @@ const ZigBindingsWriter = struct {
         );
     }
 
-    fn writeEventType(self: *ZigBindingsWriter, event: Interface.RequestEvent) !void {
+    fn writeIncomingType(self: *ZigBindingsWriter, event: Interface.RequestEvent) !void {
         if (!allArgsHaveKnownType(event)) {
             return;
         }
@@ -639,6 +639,8 @@ const ZigBindingsWriter = struct {
             \\        pub const {f} = struct {{
             \\
         , .{snakeToPascal(event.name)});
+
+        try self.writeRequiresFd(event);
 
         for (event.args) |arg| {
             if (arg.typ == .new_id and !arg.has_interface) {
@@ -660,7 +662,7 @@ const ZigBindingsWriter = struct {
     }
 
     /// name: Name
-    fn writeEventField(self: *ZigBindingsWriter, event: Interface.RequestEvent) !void {
+    fn writeIncomingField(self: *ZigBindingsWriter, event: Interface.RequestEvent) !void {
         if (allArgsHaveKnownType(event)) {
             try self.writer.print("        {s}: {f},\n", .{ dodgeReservedKeyword(event.name), snakeToPascal(event.name) });
         } else {
@@ -668,29 +670,41 @@ const ZigBindingsWriter = struct {
         }
     }
 
-    fn writeEventParseStart(self: *ZigBindingsWriter) !void {
+    fn writeRequiresFd(self: *ZigBindingsWriter, event: Interface.RequestEvent) !void {
+        var requires_fd = false;
+        for (event.args) |arg| {
+            if (arg.typ == .fd) {
+                requires_fd = true;
+                break;
+            }
+        }
+
+        try self.writer.print("            pub const requires_fd = {};\n", .{requires_fd});
+    }
+
+    fn writeIncomingParseStart(self: *ZigBindingsWriter) !void {
         try self.writer.writeAll(
-            \\        pub fn parse(op: u32, data: []const u8) !Event {
+            \\        pub fn parse(op: u32, data: []const u8) !IncomingMessage {
             \\            return switch (op) {
             \\
         );
     }
 
-    fn writeEventParseEnd(self: *ZigBindingsWriter, interface: Interface) !void {
+    fn writeIncomingParseEnd(self: *ZigBindingsWriter, interface_name: []const u8) !void {
         try self.writer.print(
             \\                else => {{
-            \\                    std.log.warn("Unknown {s} event {{d}}", .{{op}});
-            \\                    return error.UnknownEvent;
+            \\                    std.log.warn("Unknown {s} message {{d}}", .{{op}});
+            \\                    return error.UnknownMessage;
             \\                }}
             \\            }};
             \\        }}
             \\
         ,
-            .{interface.name},
+            .{interface_name},
         );
     }
 
-    fn writeEventParseStatement(self: *ZigBindingsWriter, event: Interface.RequestEvent, i: usize) !void {
+    fn writeIncomingParseStatement(self: *ZigBindingsWriter, event: Interface.RequestEvent, i: usize) !void {
         if (allArgsHaveKnownType(event)) {
             try self.writer.print(
                 \\               {d} => .{{ .{s} = try wlio.parseDataResponse({f}, data) }},
@@ -712,47 +726,64 @@ const ZigBindingsWriter = struct {
     }
 
     fn writeEventUnion(self: *ZigBindingsWriter, interfaces: []const Interface) !void {
-        try self.writer.writeAll("pub const WaylandEventType = enum {\n");
+        try self.writer.writeAll("pub const WaylandInterfaceType = enum {\n");
         for (interfaces) |interface| {
             try self.writer.print("    {s},\n", .{interface.name});
         }
         try self.writer.writeAll("};\n\n");
 
-        try self.writer.writeAll("pub const WaylandEvent = union(WaylandEventType) {\n");
+        try self.writer.writeAll("pub const WaylandIncomingMessage = union(WaylandInterfaceType) {\n");
         for (interfaces) |interface| {
-            try self.writer.print("    {s}: {f}.Event,\n", .{ interface.name, snakeToPascal(interface.name) });
+            try self.writer.print("    {s}: {f}.IncomingMessage,\n", .{ interface.name, snakeToPascal(interface.name) });
         }
         try self.writer.writeAll("};\n\n");
     }
 
-    fn writeInterface(self: *ZigBindingsWriter, interface: Interface) !void {
-        try self.writeInterfaceStart(interface);
+    fn writeGetInterfaceVersion(self: *ZigBindingsWriter, interfaces: []const Interface) !void {
+        try self.writer.writeAll(
+            \\pub fn getInterfaceVersion(interface: WaylandInterfaceType) u32 {
+            \\    return switch (interface) {
+            \\
+        );
 
-        for (interface.requests, 0..) |req, i| {
-            try self.writeInterfaceReq(interface, req, i);
+        for (interfaces) |interface| {
+            try self.writer.print("        .{s} => {d},\n", .{ interface.name, interface.version });
         }
 
-        if (interface.events.len == 0) {
-            try self.writer.writeAll("    pub const Event = struct {};");
-        } else {
-            try self.writeEventsStart();
+        try self.writer.writeAll(
+            \\    };
+            \\}
+        );
+    }
 
-            for (interface.events) |event| {
-                try self.writeEventField(event);
+    fn writeInterface(self: *ZigBindingsWriter, interface_name: []const u8, outgoing: []const Interface.RequestEvent, incoming: []const Interface.RequestEvent) !void {
+        try self.writeInterfaceStart(interface_name);
+
+        for (outgoing, 0..) |req, i| {
+            try self.writeInterfaceReq(interface_name, req, i);
+        }
+
+        if (incoming.len == 0) {
+            try self.writer.writeAll("    pub const IncomingMessage = struct {};");
+        } else {
+            try self.writeIncomingStart();
+
+            for (incoming) |event| {
+                try self.writeIncomingField(event);
             }
 
             try self.writer.writeByte('\n');
 
-            for (interface.events) |event| {
-                try self.writeEventType(event);
+            for (incoming) |event| {
+                try self.writeIncomingType(event);
             }
 
-            if (anyEventCanBeParsed(interface)) {
-                try self.writeEventParseStart();
-                for (interface.events, 0..) |event, i| {
-                    try self.writeEventParseStatement(event, i);
+            if (anyEventCanBeParsed(incoming)) {
+                try self.writeIncomingParseStart();
+                for (incoming, 0..) |event, i| {
+                    try self.writeIncomingParseStatement(event, i);
                 }
-                try self.writeEventParseEnd(interface);
+                try self.writeIncomingParseEnd(interface_name);
             }
 
             try self.writeEventsEnd();
@@ -797,18 +828,56 @@ fn parseWaylandXml(alloc: Allocator, wayland_xml_path: []const u8) ![]Interface 
     return try wayland_parser.interfaces.toOwnedSlice(alloc);
 }
 
+const BindingsMode = enum {
+    client,
+    server,
+};
+
+const Args = struct {
+    bindings_mode: BindingsMode,
+    inputs: [][]const u8,
+    output: []const u8,
+    it: std.process.ArgIterator,
+
+    fn parse(alloc: std.mem.Allocator) !Args {
+        var it = try std.process.argsWithAllocator(alloc);
+        const process_name = it.next() orelse "wlgen";
+        _ = process_name;
+
+        const bindings_mode_s = it.next() orelse return error.NoBindings;
+        const bindings_mode = std.meta.stringToEnum(BindingsMode, bindings_mode_s) orelse return error.InvalidBinding;
+
+        var inputs = std.ArrayList([]const u8){};
+        var last_arg: []const u8 = it.next() orelse return error.NoInputs;
+        while (it.next()) |arg| {
+            try inputs.append(alloc, last_arg);
+            last_arg = arg;
+        }
+
+        return .{
+            .bindings_mode = bindings_mode,
+            .inputs = try inputs.toOwnedSlice(alloc),
+            .output = last_arg,
+            .it = it,
+        };
+    }
+
+    fn deinit(self: *Args, alloc: std.mem.Allocator) void {
+        alloc.free(self.inputs);
+        self.it.deinit();
+    }
+};
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
 
     const alloc = gpa.allocator();
 
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
+    var args = try Args.parse(alloc);
+    defer args.deinit(alloc);
 
-    const output_path = args[args.len - 1];
-
-    const output_file = try std.fs.cwd().createFile(output_path, .{});
+    const output_file = try std.fs.cwd().createFile(args.output, .{});
     defer output_file.close();
 
     var output_buf: [4096]u8 = undefined;
@@ -822,17 +891,22 @@ pub fn main() !void {
         for (interfaces.items) |*interface| interface.deinit(alloc);
         interfaces.deinit(alloc);
     }
-    for (args[1 .. args.len - 1]) |wayland_xml_path| {
+    for (args.inputs) |wayland_xml_path| {
         const xml_interfaces = try parseWaylandXml(alloc, wayland_xml_path);
         defer alloc.free(xml_interfaces);
 
         try interfaces.appendSlice(alloc, xml_interfaces);
     }
 
+    try zig_writer.writeGetInterfaceVersion(interfaces.items);
     try zig_writer.writeEventUnion(interfaces.items);
 
     for (interfaces.items) |interface| {
-        try zig_writer.writeInterface(interface);
+        const outgoing, const incoming = switch (args.bindings_mode) {
+            .client => .{ interface.requests, interface.events },
+            .server => .{ interface.events, interface.requests },
+        };
+        try zig_writer.writeInterface(interface.name, outgoing, incoming);
     }
 
     try output_writer.interface.flush();

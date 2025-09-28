@@ -200,7 +200,6 @@ pub const Window = struct {
 
         const buf_fd = front_buf.fd();
         try wlclient.sendMessageWithFdAttachment(
-            alloc,
             self.client.stream,
             add_writer.written(),
             @bitCast(buf_fd),
@@ -310,6 +309,17 @@ pub const Window = struct {
                             break :blk;
                         };
                         self.gbm_ctx.unlock(gbm_handle);
+
+                        const iface = wlb.WlBuffer{ .id = event.object_id };
+                        try iface.destroy(self.client.writer(), .{});
+                    },
+                }
+            },
+            .zwp_linux_buffer_params_v1 => |parsed| {
+                switch (parsed) {
+                    .created, .failed => {
+                        var params = wlb.ZwpLinuxBufferParamsV1{ .id = event.object_id };
+                        try params.destroy(self.client.writer(), .{});
                     },
                 }
             },

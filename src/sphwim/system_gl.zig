@@ -1,5 +1,6 @@
 const std = @import("std");
-const c = @import("c_bindings");
+const c = @import("gl_system_bindings");
+const rendering = @import("rendering.zig");
 
 pub const GbmContext = struct {
     drm_handle: std.fs.File,
@@ -9,8 +10,12 @@ pub const GbmContext = struct {
     pub const Buffer = struct {
         inner: *c.gbm_bo,
 
-        pub fn fd(self: Buffer) c_int {
-            return c.gbm_bo_get_fd(self.inner);
+        pub fn fd(self: Buffer) !c_int {
+            const ret = c.gbm_bo_get_fd(self.inner);
+            if (ret < 0) {
+                return error.BadF;
+            }
+            return ret;
         }
 
         pub fn offset(self: Buffer) u32 {
@@ -80,6 +85,8 @@ pub const GbmContext = struct {
         self.drm_handle.close();
     }
 };
+
+pub const getProcAddress = c.eglGetProcAddress;
 
 pub const EglContext = struct {
     display: c.EGLDisplay,
@@ -181,5 +188,37 @@ pub const EglContext = struct {
         _ = c.eglDestroySurface(self.display, self.surface);
         _ = c.eglDestroyContext(self.display, self.context);
         _ = c.eglTerminate(self.display);
+    }
+
+    pub fn importDmaBuf(self: EglContext, buffer: rendering.RenderBuffer) !c.EGLImage {
+        const attrib_list: []const c.EGLAttrib = &.{
+            c.EGL_WIDTH,                          buffer.width,
+            c.EGL_HEIGHT,                         buffer.height,
+            c.EGL_LINUX_DRM_FOURCC_EXT,           buffer.format,
+            c.EGL_DMA_BUF_PLANE0_FD_EXT,          buffer.buf_fd,
+            c.EGL_DMA_BUF_PLANE0_OFFSET_EXT,      buffer.offset,
+            c.EGL_DMA_BUF_PLANE0_PITCH_EXT,       buffer.stride,
+            c.EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT, @as(u32, @truncate(buffer.modifiers)),
+            c.EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT, @as(u32, @truncate(buffer.modifiers >> 32)),
+            c.EGL_NONE,
+        };
+
+        const egl_image = c.eglCreateImage(
+            self.display,
+            null,
+            c.EGL_LINUX_DMA_BUF_EXT,
+            null,
+            attrib_list.ptr,
+        );
+
+        if (egl_image == c.EGL_NO_IMAGE) {
+            return error.ImportFailed;
+        }
+
+        return egl_image;
+    }
+
+    pub fn freeEglImage(self: EglContext, image: c.EGLImage) void {
+        _ = c.eglDestroyImage(self.display, image);
     }
 };

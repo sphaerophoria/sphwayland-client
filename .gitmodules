@@ -1,0 +1,3 @@
+[submodule "sphtud"]
+	path = sphtud
+	url = ../sphtud

@@ -2,9 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const wlio = @import("wlio");
 const HeaderLE = wlio.HeaderLE;
-const cmsg = @cImport({
-    @cInclude("cmsg.h");
-});
+const fd_cmsg = @import("fd_cmsg");
 
 pub fn Client(comptime Bindings: type) type {
     return struct {
@@ -37,7 +35,7 @@ pub fn Client(comptime Bindings: type) type {
             self.interfaces.deinit();
         }
 
-        pub fn bind(self: *Self, comptime T: type, global: Bindings.WlRegistry.Event.Global) !T {
+        pub fn bind(self: *Self, comptime T: type, global: Bindings.WlRegistry.IncomingMessage.Global) !T {
             return try self.interfaces.bind(T, &self.stream_writer.interface, global);
         }
 
@@ -83,24 +81,23 @@ pub fn logWaylandErr(err: anytype) void {
     std.log.err("wl_display::error: object {d}, code: {d}, msg: {s}", .{ err.object_id, err.code, err.message });
 }
 
-pub fn sendMessageWithFdAttachment(alloc: Allocator, stream: std.net.Stream, msg: []const u8, fd: c_int) !void {
-    // This has to be a comptime known value, but the alignment is kinda
-    // defined by the C macros. We'll just use 8 and assume that it can't be
-    // wrong
-    const cmsg_buf_alignment: std.mem.Alignment = .@"8";
-    const cmsg_buf = try alloc.allocWithOptions(
-        u8,
-        cmsg.getCmsgSpace(@sizeOf(std.posix.fd_t)),
-        cmsg_buf_alignment,
-        null,
-    );
-    defer alloc.free(cmsg_buf);
+// FIXME: duplicated with sphwim
+const CmsgHdr = extern struct {
+    cmsg_len: usize,
+    cmsg_level: c_int,
+    cmsg_type: c_int,
+};
 
-    cmsg.makeFdTransferCmsg(
-        cmsg_buf.ptr,
-        @ptrCast(&fd),
-        @sizeOf(std.posix.fd_t),
-    );
+pub fn sendMessageWithFdAttachment(stream: std.net.Stream, msg: []const u8, fd: c_int) !void {
+    const SCM_RIGHTS = 1;
+    var cmsg_buf: [fd_cmsg.fd_cmsg_space]u8 = @splat(0);
+    const hdr = CmsgHdr{
+        .cmsg_len = fd_cmsg.fd_cmsg_len,
+        .cmsg_level = std.os.linux.SOL.SOCKET,
+        .cmsg_type = SCM_RIGHTS,
+    };
+    @memcpy(cmsg_buf[0..@sizeOf(CmsgHdr)], std.mem.asBytes(&hdr));
+    @memcpy(cmsg_buf[fd_cmsg.fd_cmsg_data_offs..][0..@sizeOf(c_int)], std.mem.asBytes(&fd));
 
     const iov = [1]std.posix.iovec_const{.{
         .base = msg.ptr,
@@ -112,8 +109,8 @@ pub fn sendMessageWithFdAttachment(alloc: Allocator, stream: std.net.Stream, msg
         .namelen = 0,
         .iov = &iov,
         .iovlen = 1,
-        .control = cmsg_buf.ptr,
-        .controllen = @intCast(cmsg_buf.len),
+        .control = &cmsg_buf,
+        .controllen = cmsg_buf.len,
         .flags = 0,
     };
 
@@ -128,7 +125,7 @@ pub fn InterfaceRegistry(comptime Bindings: type) type {
         registry: Bindings.WlRegistry,
 
         const Self = @This();
-        const InterfaceMap = std.AutoHashMap(u32, Bindings.WaylandEventType);
+        const InterfaceMap = std.AutoHashMap(u32, Bindings.WaylandInterfaceType);
 
         pub fn init(alloc: Allocator, registry: Bindings.WlRegistry) !Self {
             var elems = InterfaceMap.init(alloc);
@@ -147,11 +144,11 @@ pub fn InterfaceRegistry(comptime Bindings: type) type {
             self.elems.deinit();
         }
 
-        pub fn get(self: Self, id: u32) ?Bindings.WaylandEventType {
+        pub fn get(self: Self, id: u32) ?Bindings.WaylandInterfaceType {
             return self.elems.get(id);
         }
 
-        pub fn bind(self: *Self, comptime T: type, writer: *std.Io.Writer, params: Bindings.WlRegistry.Event.Global) !T {
+        pub fn bind(self: *Self, comptime T: type, writer: *std.Io.Writer, params: Bindings.WlRegistry.IncomingMessage.Global) !T {
             defer self.idx += 1;
 
             try self.registry.bind(writer, .{
@@ -174,10 +171,10 @@ pub fn InterfaceRegistry(comptime Bindings: type) type {
             };
         }
 
-        fn resolveInterfaceType(comptime T: type) Bindings.WaylandEventType {
-            inline for (std.meta.fields(Bindings.WaylandEvent)) |field| {
-                if (field.type == T.Event) {
-                    return @field(Bindings.WaylandEventType, field.name);
+        fn resolveInterfaceType(comptime T: type) Bindings.WaylandInterfaceType {
+            inline for (std.meta.fields(Bindings.WaylandIncomingMessage)) |field| {
+                if (field.type == T.IncomingMessage) {
+                    return @field(Bindings.WaylandInterfaceType, field.name);
                 }
             }
 
@@ -208,7 +205,7 @@ const DoubleEndedBuf = struct {
 pub fn Event(comptime Bindings: type) type {
     return struct {
         object_id: u32,
-        event: Bindings.WaylandEvent,
+        event: Bindings.WaylandIncomingMessage,
     };
 }
 
@@ -290,17 +287,17 @@ pub fn EventIt(comptime Bindings: type) type {
             const data = self.client.event_buf.data[header_end..data_end];
             const interface = self.client.interfaces.get(header.id) orelse return null;
 
-            inline for (std.meta.fields(Bindings.WaylandEvent)) |field| {
-                if (@field(Bindings.WaylandEventType, field.name) == interface) {
+            inline for (std.meta.fields(Bindings.WaylandIncomingMessage)) |field| {
+                if (@field(Bindings.WaylandInterfaceType, field.name) == interface) {
                     if (@hasDecl(field.type, "parse")) {
                         return .{
                             .object_id = header.id,
-                            .event = @unionInit(Bindings.WaylandEvent, field.name, try field.type.parse(header.op, data)),
+                            .event = @unionInit(Bindings.WaylandIncomingMessage, field.name, try field.type.parse(header.op, data)),
                         };
                     } else {
                         return .{
                             .object_id = header.id,
-                            .event = @unionInit(Bindings.WaylandEvent, field.name, .{}),
+                            .event = @unionInit(Bindings.WaylandIncomingMessage, field.name, .{}),
                         };
                     }
                 }
