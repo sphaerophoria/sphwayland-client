@@ -208,6 +208,7 @@ pub const Window = struct {
             add_writer.written(),
             @bitCast(buf_fd),
         );
+        std.posix.close(buf_fd);
     }
 
     pub fn swapBuffers(self: *Window, alloc: std.mem.Allocator) !void {
