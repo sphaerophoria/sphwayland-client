@@ -14,10 +14,12 @@ const CmsgHdr = extern struct {
 const WlReader = struct {
     socket: std.net.Stream,
     fd_list: sphtud.util.CircularBuffer(std.posix.fd_t),
+    last_res: std.os.linux.E = .SUCCESS,
     interface: std.Io.Reader,
 
     fn stream(r: *std.Io.Reader, writer: *std.Io.Writer, limit: std.Io.Limit) error{EndOfStream,ReadFailed,WriteFailed}!usize{
         const self: *WlReader = @fieldParentPtr("interface", r);
+        self.last_res = .SUCCESS;
 
         const dest = limit.slice(try writer.writableSliceGreedy(1));
 
@@ -47,7 +49,10 @@ const WlReader = struct {
         const linux_err: std.os.linux.E = .init(ret);
         switch (linux_err) {
             .SUCCESS => {},
-            else => return error.ReadFailed,
+            else => {
+                self.last_res = linux_err;
+                return error.ReadFailed;
+            },
         }
 
         if (msg_header.controllen >= @sizeOf(CmsgHdr)) {
@@ -552,6 +557,144 @@ fn handleConnection(scratch: *sphtud.alloc.BufAllocator, alloc: *sphtud.alloc.Sp
     }
 }
 
+const WlConnection = struct {
+    alloc: *sphtud.alloc.Sphalloc,
+    scratch: *sphtud.alloc.BufAllocator,
+    connection: std.net.Server.Connection,
+
+    stream_reader: *WlReader,
+    io_reader: *std.Io.Reader,
+    io_writer: *std.Io.Writer,
+    state: *ConnectionState,
+
+    const vtable = sphtud.event.Handler.VTable {
+        .poll = poll,
+        .close = close,
+    };
+
+    fn init(alloc: *sphtud.alloc.Sphalloc, scratch: *sphtud.alloc.BufAllocator, connection: std.net.Server.Connection, drm_ctx: *backend.Drm) !WlConnection {
+        const stream_writer = try alloc.arena().create(std.net.Stream.Writer);
+        stream_writer.* = connection.stream.writer(try alloc.arena().alloc(u8, 4096));
+        const io_writer = &stream_writer.interface;
+
+        const stream_reader = try alloc.arena().create(WlReader);
+        stream_reader.* =  WlReader {
+            .socket = connection.stream,
+            .fd_list = .{
+                // 100 file descriptors received before we handle any of them seems
+                // like an insanely large number for a single connection
+                .items = try alloc.arena().alloc(c_int, 100),
+            },
+            .interface = std.Io.Reader {
+                .buffer = try alloc.arena().alloc(u8, 4096),
+                .vtable = &.{
+                    .stream = WlReader.stream,
+                },
+                .seek = 0,
+                .end = 0,
+            },
+        };
+        const io_reader = &stream_reader.interface;
+
+        var state = try alloc.arena().create(ConnectionState);
+        try state.initPinned(alloc, drm_ctx, io_writer);
+
+        return .{
+            .alloc = alloc,
+            .scratch = scratch,
+            .connection = connection,
+            .stream_reader = stream_reader,
+            .io_reader = io_reader,
+            .io_writer = io_writer,
+            .state = state,
+
+        };
+    }
+
+    fn handler(self: *WlConnection) sphtud.event.Handler {
+        return .{
+            .ptr = self,
+            .vtable = &vtable,
+            .fd = self.connection.stream.handle,
+        };
+    }
+
+    fn poll(ctx: ?*anyopaque, _: *sphtud.event.Loop) sphtud.event.PollResult {
+        const self: *WlConnection = @ptrCast(@alignCast(ctx));
+        self.pollError()  catch |e| {
+            switch (e) {
+                error.ReadFailed => {
+                    switch (self.stream_reader.last_res) {
+                        .AGAIN => return .in_progress,
+                        else => {
+                            std.log.err("Failure to read wl client {t} (stream {d}), {f}", .{e, self.stream_reader.last_res, @errorReturnTrace().?});
+                            return .complete;
+
+                        },
+                    }
+                },
+                else => {
+                    std.log.err("Failure to handle wl client {t} {f}", .{e, @errorReturnTrace().?});
+                    return .complete;
+                },
+            }
+        };
+
+        return .in_progress;
+    }
+
+    fn pollError(self: *WlConnection) !void {
+        while (true) {
+            const cp = self.scratch.checkpoint();
+            defer self.scratch.restore(cp);
+
+            const header = try self.io_reader.peekStruct(wlio.HeaderLE, .little);
+            const data = (try self.io_reader.peek(header.size))[@sizeOf(wlio.HeaderLE)..];
+            _ = try self.io_reader.discard(.limited(header.size));
+
+            const req = try parseRequest(header.op, data, self.state.interface_registry.get(header.id) orelse return error.InvalidInterface);
+
+            var fd: ?std.posix.fd_t = null;
+            // FIXME: Impl
+            if (requiresFd(req)) {
+                // FIXME: Crashing here is insane
+                //   1. It might actually just not be here yet
+                //   2. The client might not send it, in which case it's better to kill the connection
+                // Crash for now so that we really notice if this ever happens
+                fd = self.stream_reader.fd_list.pop() orelse unreachable;
+            }
+
+            try self.state.handleMessage(header.id, req, fd);
+        }
+    }
+
+    fn close(ctx: ?*anyopaque) void {
+        const self: *WlConnection = @ptrCast(@alignCast(ctx));
+        self.connection.stream.close();
+        self.alloc.deinit();
+    }
+};
+
+const WlServerContext = struct {
+    server_alloc: *sphtud.alloc.Sphalloc,
+    scratch: *sphtud.alloc.BufAllocator,
+    drm_ctx: *backend.Drm,
+
+    pub fn generate(self: *WlServerContext, connection: std.net.Server.Connection) !sphtud.event.Handler {
+        const connection_alloc = try self.server_alloc.makeSubAlloc("connection");
+        errdefer connection_alloc.deinit();
+
+        const ret = try connection_alloc.arena().create(WlConnection);
+        ret.* = try WlConnection.init(connection_alloc, self.scratch, connection, self.drm_ctx);
+
+        return ret.handler();
+    }
+
+    pub fn close(self: *WlServerContext) void {
+        self.server_alloc.deinit();
+    }
+};
+
 pub fn main() !void {
     var tpa: sphtud.alloc.TinyPageAllocator = undefined;
     try tpa.initPinned();
@@ -565,24 +708,40 @@ pub fn main() !void {
 
     var drm = try backend.initializeDrm();
 
-    var socket = try createWaylandSocket(scratch.linear());
+    var loop = try sphtud.event.Loop.init(&root_alloc);
+    var server_context = WlServerContext{
+        .server_alloc = try root_alloc.makeSubAlloc("server"),
+        .scratch = &scratch,
+        .drm_ctx = &drm,
+    };
+
+
+    const socket = try createWaylandSocket(scratch.linear());
+    var server = try sphtud.event.net.server(socket, &server_context);
+    try loop.register(server.handler());
+
     while (true) {
-        // FIXME hook up to event loop
-        const connection = try socket.accept();
-        defer connection.stream.close();
-
-        var connection_alloc = try root_alloc.makeSubAlloc("connection");
-        defer connection_alloc.deinit();
-
         scratch.reset();
-
-        handleConnection(&scratch, connection_alloc, &drm, connection) catch |e| switch (e) {
-            error.EndOfStream => {
-                std.log.debug("connection closed", .{});
-            },
-            else => {
-                std.log.err("connection failed: {t}\n", .{e});
-            }
-        };
+        try loop.wait(&scratch);
     }
+
+    //while (true) {
+    //    // FIXME hook up to event loop
+    //    const connection = try socket.accept();
+    //    defer connection.stream.close();
+
+    //    var connection_alloc = try root_alloc.makeSubAlloc("connection");
+    //    defer connection_alloc.deinit();
+
+    //    scratch.reset();
+
+    //    handleConnection(&scratch, connection_alloc, &drm, connection) catch |e| switch (e) {
+    //        error.EndOfStream => {
+    //            std.log.debug("connection closed", .{});
+    //        },
+    //        else => {
+    //            std.log.err("connection failed: {t}\n", .{e});
+    //        }
+    //    };
+    //}
 }
