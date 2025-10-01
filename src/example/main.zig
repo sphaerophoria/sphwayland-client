@@ -7,7 +7,7 @@ const ModelRenderer = @import("ModelRenderer.zig");
 const gl = @import("gl");
 
 pub const std_options = std.Options{
-    .log_level = .warn,
+    .log_level = .debug,
 };
 
 fn debugCallback(_: gl.GLenum, _: gl.GLenum, _: gl.GLuint, _: gl.GLenum, length: gl.GLsizei, message: [*c]const gl.GLchar, _: ?*const anyopaque) callconv(.c) void {

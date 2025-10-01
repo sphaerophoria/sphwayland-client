@@ -339,6 +339,14 @@ const ConnectionState = struct {
                     try state.xdg_surfaces.insert(state.alloc.general(), params.id, handle);
 
                     try state.interface_registry.put(state.alloc.general(), params.id, .xdg_surface);
+
+                    const xdg_id = surface.xdg_surface_id orelse return error.InvalidSurface;
+                    var xdg_surf = Bindings.XdgSurface { .id = xdg_id };
+                    try xdg_surf.configure(state.io_writer, .{
+                        // FIXME: Random number that is confirmed in ack
+                        .serial = 1234,
+                    });
+                    try state.io_writer.flush();
                 },
                 else => {
                     logUnhandledRequest(object_id, req);
@@ -378,7 +386,6 @@ const ConnectionState = struct {
             .wl_surface => |parsed| switch (parsed) {
                 .commit => {
                     const surface = state.wl_surfaces.get(object_id) orelse return error.InvalidSurface;
-                    const xdg_id = surface.xdg_surface_id orelse return error.InvalidSurface;
 
 
                     if (surface.buffer) |buf_handle| {
@@ -396,12 +403,6 @@ const ConnectionState = struct {
                         );
                     }
 
-                    var xdg_surf = Bindings.XdgSurface { .id = xdg_id };
-                    // FIXME: Probably don't send this every commit lol, only on the first one
-                    try xdg_surf.configure(state.io_writer, .{
-                        // FIXME: Random number that is confirmed in ack
-                        .serial = 1234,
-                    });
                     try state.io_writer.flush();
                 },
                 .frame => |params| {
