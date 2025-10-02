@@ -39,9 +39,11 @@ fn drawRect(data: []u32, stride: usize, x1: usize, y1: usize, x2: usize, y2: usi
 
 pub const Drm = struct {
     crtc_id: u32,
+    last_fb_id: ?u32,
     dri_file: std.fs.File,
     connector_id: u32,
     preferred_mode: *c.drmModeModeInfo,
+    page_flip_complete: bool = false,
 
     pub fn displayDmaBuf(self: *Drm,
         buf_fd: c_int,
@@ -99,10 +101,40 @@ pub const Drm = struct {
             }
         }
 
-        _ = c.drmModeSetCrtc(self.dri_file.handle, self.crtc_id, 0, 0, 0, null, 0, null);
-        _ = c.drmModeSetCrtc(self.dri_file.handle, self.crtc_id, fb_id, 0, 0, &self.connector_id, 1, self.preferred_mode);
+        // FIXME: Err check
+        //if (self.last_fb_id) |_| {
+            self.page_flip_complete = false;
+            std.debug.print("Flipping our shit\n", .{});
+            _ = c.drmModePageFlip(self.dri_file.handle, self.crtc_id, fb_id, c.DRM_MODE_PAGE_FLIP_EVENT, &self.page_flip_complete);
+        //} else {
+        //    _ = c.drmModeSetCrtc(self.dri_file.handle, self.crtc_id, 0, 0, 0, null, 0, null);
+        //    _ = c.drmModeSetCrtc(self.dri_file.handle, self.crtc_id, fb_id, 0, 0, &self.connector_id, 1, self.preferred_mode);
+        //}
+
+        self.last_fb_id = fb_id;
     }
 
+    pub fn pageFlipComplete(self: *Drm) bool {
+        if (self.last_fb_id == null) return false;
+	var evctx = c.drmEventContext{
+            .version = 2,
+            .page_flip_handler = pageFlipHandler,
+	};
+        _ = c.drmHandleEvent(self.dri_file.handle, &evctx);
+
+        return self.page_flip_complete;
+    }
+
+    fn pageFlipHandler(fd: c_int, frame: c_uint, sec: c_uint, usec: c_uint, data: ?*anyopaque) callconv(.c) void {
+        _ = fd;
+        _ = frame;
+        _ = sec;
+        _ = usec;
+
+        std.debug.print("Page flip handler time baybeee\n", .{});
+        const page_flip_complete: *bool = @ptrCast(@alignCast(data));
+        page_flip_complete.* = true;
+    }
 };
 
 pub fn initializeDrm() !Drm {
@@ -117,10 +149,13 @@ pub fn initializeDrm() !Drm {
     const encoder: *c.drmModeEncoder = c.drmModeGetEncoder(f.handle, connector.encoder_id) orelse return error.NoEncoder;
     const crtc: *c.drmModeCrtc = c.drmModeGetCrtc(f.handle, encoder.crtc_id) orelse return error.NoEncoder;
 
+    _ = c.drmModeSetCrtc(f.handle, crtc.crtc_id, 0, 0, 0, &connector.connector_id, 1, preferred_mode);
     return .{
+        .last_fb_id = null,
         .crtc_id = crtc.crtc_id,
         .dri_file = f,
         .connector_id = connector.connector_id,
         .preferred_mode = preferred_mode,
     };
 }
+

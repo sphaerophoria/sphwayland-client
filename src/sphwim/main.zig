@@ -5,6 +5,10 @@ const sphtud = @import("sphtud");
 const fd_cmsg = @import("fd_cmsg");
 const backend = @import("backend.zig");
 
+pub const std_option = std.Options {
+    .log_level = .warn,
+};
+
 const CmsgHdr = extern struct {
     cmsg_len: usize,
     cmsg_level: c_int,
@@ -265,6 +269,7 @@ const ConnectionState = struct {
     // Self reference xdg_surfaces -> wl_surfaces
     xdg_surfaces: IndirectLookupRef(Surface),
     windows: IndirectLookupOwned(Window),
+    frame_callback: ?u32 = null,
 
     drm_ctx: *backend.Drm,
 
@@ -407,16 +412,9 @@ const ConnectionState = struct {
                             buffer.format,
                         );
                     }
-
-                    try state.io_writer.flush();
                 },
                 .frame => |params| {
-                    var callback = Bindings.WlCallback { .id = params.callback };
-                    try callback.done(state.io_writer, .{
-                        .callback_data = 0,
-                    });
-
-                    try state.io_writer.flush();
+                    state.frame_callback = params.callback;
                 },
                 .attach => |params| {
                     const surface = state.wl_surfaces.getPtr(object_id) orelse return error.InvalidSurface;
@@ -572,7 +570,7 @@ const WlConnection = struct {
         .close = close,
     };
 
-    fn init(alloc: *sphtud.alloc.Sphalloc, scratch: *sphtud.alloc.BufAllocator, connection: std.net.Server.Connection, drm_ctx: *backend.Drm) !WlConnection {
+    fn init(alloc: *sphtud.alloc.Sphalloc, scratch: *sphtud.alloc.BufAllocator, connection: std.net.Server.Connection, drm_ctx: *backend.Drm, connections: *sphtud.util.RuntimeSegmentedListSphalloc(ConnectionState)) !WlConnection {
         const stream_writer = try alloc.arena().create(std.net.Stream.Writer);
         stream_writer.* = connection.stream.writer(try alloc.arena().alloc(u8, 4096));
         const io_writer = &stream_writer.interface;
@@ -596,7 +594,8 @@ const WlConnection = struct {
         };
         const io_reader = &stream_reader.interface;
 
-        var state = try alloc.arena().create(ConnectionState);
+        try connections.append(undefined);
+        const state = connections.getPtr(connections.len - 1);
         try state.initPinned(alloc, drm_ctx, io_writer);
 
         return .{
@@ -671,6 +670,7 @@ const WlConnection = struct {
     fn close(ctx: ?*anyopaque) void {
         const self: *WlConnection = @ptrCast(@alignCast(ctx));
         self.connection.stream.close();
+        // FIXME: Remove connection state from list
         self.alloc.deinit();
     }
 };
@@ -678,6 +678,7 @@ const WlConnection = struct {
 const WlServerContext = struct {
     server_alloc: *sphtud.alloc.Sphalloc,
     scratch: *sphtud.alloc.BufAllocator,
+    connections: *sphtud.util.RuntimeSegmentedListSphalloc(ConnectionState),
     drm_ctx: *backend.Drm,
 
     pub fn generate(self: *WlServerContext, connection: std.net.Server.Connection) !sphtud.event.Handler {
@@ -685,13 +686,74 @@ const WlServerContext = struct {
         errdefer connection_alloc.deinit();
 
         const ret = try connection_alloc.arena().create(WlConnection);
-        ret.* = try WlConnection.init(connection_alloc, self.scratch, connection, self.drm_ctx);
+        ret.* = try WlConnection.init(connection_alloc, self.scratch, connection, self.drm_ctx, self.connections);
 
         return ret.handler();
     }
 
     pub fn close(self: *WlServerContext) void {
         self.server_alloc.deinit();
+    }
+};
+
+const VsyncHandler = struct {
+    drm_ctx: *backend.Drm,
+    connection_states: *sphtud.util.RuntimeSegmentedListSphalloc(ConnectionState),
+    last: std.time.Instant,
+
+    const vtable = sphtud.event.Handler.VTable {
+        .poll = poll,
+        .close = close,
+    };
+
+    fn handler(self: *VsyncHandler) sphtud.event.Handler {
+        return .{
+            .ptr = self,
+            .fd = self.drm_ctx.dri_file.handle,
+            .vtable = &vtable,
+        };
+    }
+
+    fn poll(ctx: ?*anyopaque, _: *sphtud.event.Loop) sphtud.event.PollResult {
+        const self: *VsyncHandler = @ptrCast(@alignCast(ctx));
+        if (!self.drm_ctx.pageFlipComplete()) {
+            return .in_progress;
+        }
+
+        const now = std.time.Instant.now() catch return .complete;
+        defer self.last = now;
+
+        var it = self.connection_states.iter();
+        while (it.next()) |state| {
+            if (state.frame_callback) |id| {
+                var callback = Bindings.WlCallback { .id = id };
+                callback.done(state.io_writer, .{
+                    .callback_data = 0,
+                }) catch unreachable;
+
+                // FIXME: Do we have to ensure only the buffers currently queued get relaesed
+                const buffer_keys = state.wl_buffers.mapping.keys();
+                for (buffer_keys) |buffer_id| {
+                    var buffer = Bindings.WlBuffer { .id = buffer_id };
+                    buffer.release(state.io_writer, .{}) catch unreachable;
+                }
+                // FIXME: Cleanup any corresponding buffers
+                state.wl_buffers.storage.clearRetainingCapacity();
+                state.wl_buffers.mapping.clearRetainingCapacity();
+
+                state.io_writer.flush() catch unreachable;
+
+            }
+        }
+
+        std.debug.print("flipppy floppy {d}\n", .{now.since(self.last) / std.time.ns_per_ms});
+
+        // Notify all connections that it is time to rerender
+        return .in_progress;
+    }
+
+    fn close(ctx: ?*anyopaque) void {
+        _ = ctx;
     }
 };
 
@@ -706,11 +768,26 @@ pub fn main() !void {
         try root_alloc.arena().alloc(u8, 1 * 1024 * 1024),
     );
 
+    var connections = try sphtud.util.RuntimeSegmentedListSphalloc(ConnectionState).init(
+        root_alloc.arena(),
+        root_alloc.block_alloc.allocator(),
+        10,
+        10 * 1024,
+    );
+
     var drm = try backend.initializeDrm();
 
+    var vsync_handler = VsyncHandler {
+        .drm_ctx = &drm,
+        .last = try std.time.Instant.now(),
+        .connection_states = &connections,
+    };
+
     var loop = try sphtud.event.Loop.init(&root_alloc);
+    try loop.register(vsync_handler.handler());
     var server_context = WlServerContext{
         .server_alloc = try root_alloc.makeSubAlloc("server"),
+        .connections = &connections,
         .scratch = &scratch,
         .drm_ctx = &drm,
     };
