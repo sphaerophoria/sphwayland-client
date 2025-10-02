@@ -3,7 +3,7 @@ const wlio = @import("wlio");
 const Bindings = @import("wayland_bindings");
 const sphtud = @import("sphtud");
 const fd_cmsg = @import("fd_cmsg");
-const backend = @import("backend.zig");
+const rendering = @import("rendering.zig");
 
 pub const std_option = std.Options {
     .log_level = .warn,
@@ -271,9 +271,9 @@ const ConnectionState = struct {
     windows: IndirectLookupOwned(Window),
     frame_callback: ?u32 = null,
 
-    drm_ctx: *backend.Drm,
+    render_backend: rendering.RenderBackend,
 
-    fn initPinned(self: *ConnectionState, alloc: *sphtud.alloc.Sphalloc, drm_ctx: *backend.Drm, io_writer: *std.Io.Writer) !void {
+    fn initPinned(self: *ConnectionState, alloc: *sphtud.alloc.Sphalloc, render_backend: rendering.RenderBackend, io_writer: *std.Io.Writer) !void {
         self.* = .{
             .alloc = alloc,
             .io_writer = io_writer,
@@ -283,7 +283,7 @@ const ConnectionState = struct {
             .windows = .init(),
             .wl_buffers = .init(),
             .zwp_params = .init(),
-            .drm_ctx = drm_ctx,
+            .render_backend = render_backend,
         };
 
         self.xdg_surfaces = .{
@@ -401,15 +401,17 @@ const ConnectionState = struct {
                     if (surface.buffer) |buf_handle| {
                         const buffer = state.wl_buffers.storage.items[buf_handle];
 
-                        try state.drm_ctx.displayDmaBuf(
-                            buffer.buf_params.fd,
-                            buffer.buf_params.modifier,
-                            buffer.buf_params.offset,
-                            buffer.buf_params.plane_idx,
-                            buffer.buf_params.stride,
-                            buffer.width,
-                            buffer.height,
-                            buffer.format,
+                        try state.render_backend.displayBuffer(
+                            .{
+                                .buf_fd = buffer.buf_params.fd,
+                                .modifiers = buffer.buf_params.modifier,
+                                .offset = buffer.buf_params.offset,
+                                .plane_idx = buffer.buf_params.plane_idx,
+                                .stride = buffer.buf_params.stride,
+                                .width = buffer.width,
+                                .height = buffer.height,
+                                .format = buffer.format,
+                            },
                         );
                     }
                 },
@@ -518,7 +520,7 @@ const WlConnection = struct {
         .close = close,
     };
 
-    fn init(alloc: *sphtud.alloc.Sphalloc, connection: std.net.Server.Connection, drm_ctx: *backend.Drm, connections: *sphtud.util.RuntimeSegmentedListSphalloc(ConnectionState)) !WlConnection {
+    fn init(alloc: *sphtud.alloc.Sphalloc, connection: std.net.Server.Connection, render_backend: rendering.RenderBackend, connections: *sphtud.util.RuntimeSegmentedListSphalloc(ConnectionState)) !WlConnection {
         const stream_writer = try alloc.arena().create(std.net.Stream.Writer);
         stream_writer.* = connection.stream.writer(try alloc.arena().alloc(u8, 4096));
         const io_writer = &stream_writer.interface;
@@ -544,7 +546,7 @@ const WlConnection = struct {
 
         try connections.append(undefined);
         const state = connections.getPtr(connections.len - 1);
-        try state.initPinned(alloc, drm_ctx, io_writer);
+        try state.initPinned(alloc, render_backend, io_writer);
 
         return .{
             .alloc = alloc,
@@ -623,14 +625,14 @@ const WlConnection = struct {
 const WlServerContext = struct {
     server_alloc: *sphtud.alloc.Sphalloc,
     connections: *sphtud.util.RuntimeSegmentedListSphalloc(ConnectionState),
-    drm_ctx: *backend.Drm,
+    render_backend: rendering.RenderBackend,
 
     pub fn generate(self: *WlServerContext, connection: std.net.Server.Connection) !sphtud.event.Handler {
         const connection_alloc = try self.server_alloc.makeSubAlloc("connection");
         errdefer connection_alloc.deinit();
 
         const ret = try connection_alloc.arena().create(WlConnection);
-        ret.* = try WlConnection.init(connection_alloc, connection, self.drm_ctx, self.connections);
+        ret.* = try WlConnection.init(connection_alloc, connection, self.render_backend, self.connections);
 
         return ret.handler();
     }
@@ -641,7 +643,7 @@ const WlServerContext = struct {
 };
 
 const VsyncHandler = struct {
-    drm_ctx: *backend.Drm,
+    render_backend: rendering.RenderBackend,
     connection_states: *sphtud.util.RuntimeSegmentedListSphalloc(ConnectionState),
     last: std.time.Instant,
 
@@ -653,14 +655,18 @@ const VsyncHandler = struct {
     fn handler(self: *VsyncHandler) sphtud.event.Handler {
         return .{
             .ptr = self,
-            .fd = self.drm_ctx.dri_file.handle,
+            .fd = self.render_backend.event_fd,
             .vtable = &vtable,
         };
     }
 
     fn poll(ctx: ?*anyopaque, _: *sphtud.event.Loop) sphtud.event.PollResult {
         const self: *VsyncHandler = @ptrCast(@alignCast(ctx));
-        if (!self.drm_ctx.pageFlipComplete()) {
+        self.render_backend.service() catch {
+            return .complete;
+        };
+
+        if (!self.render_backend.wantsRender()) {
             return .in_progress;
         }
 
@@ -719,10 +725,10 @@ pub fn main() !void {
         10 * 1024,
     );
 
-    var drm = try backend.initializeDrm();
+    const render_backend = try rendering.initRenderBackend(root_alloc.arena());
 
     var vsync_handler = VsyncHandler {
-        .drm_ctx = &drm,
+        .render_backend = render_backend,
         .last = try std.time.Instant.now(),
         .connection_states = &connections,
     };
@@ -732,7 +738,7 @@ pub fn main() !void {
     var server_context = WlServerContext{
         .server_alloc = try root_alloc.makeSubAlloc("server"),
         .connections = &connections,
-        .drm_ctx = &drm,
+        .render_backend = render_backend,
     };
 
     const socket = try createWaylandSocket(scratch.linear());
