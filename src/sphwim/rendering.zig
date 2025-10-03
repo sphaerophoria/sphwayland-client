@@ -1,9 +1,10 @@
 const std = @import("std");
 const DrmRenderBackend = @import("rendering/DrmRenderBackend.zig");
 const NullRenderBackend = @import("rendering/NullRenderBackend.zig");
+const wayland = @import("wayland.zig");
 
 pub const RenderBuffer = struct {
-    wl_buffer: u32,
+    wl_buffer: wayland.Connection.WlBufferId,
     buf_fd: c_int,
     modifiers: u64,
     offset: u32,

@@ -1,17 +1,20 @@
 const std = @import("std");
 const sphtud = @import("sphtud");
 const fd_cmsg = @import("fd_cmsg");
+const FdPool = @import("../FdPool.zig");
 
 const Reader = @This();
 
 socket: std.net.Stream,
+fd_pool: *FdPool,
 fd_list: sphtud.util.CircularBuffer(std.posix.fd_t),
 last_res: std.os.linux.E = .SUCCESS,
 interface: std.Io.Reader,
 
-pub fn init(alloc: std.mem.Allocator, socket: std.net.Stream) !Reader {
+pub fn init(alloc: std.mem.Allocator, fd_pool: *FdPool, socket: std.net.Stream) !Reader {
     return .{
         .socket = socket,
+        .fd_pool = fd_pool,
         .fd_list = .{
             // 100 file descriptors received before we handle any of them seems
             // like an insanely large number for a single connection
@@ -70,13 +73,21 @@ fn stream(r: *std.Io.Reader, writer: *std.Io.Writer, limit: std.Io.Limit) error{
         },
     }
 
-    if (msg_header.controllen >= @sizeOf(CmsgHdr)) {
+    if (msg_header.controllen >= @sizeOf(CmsgHdr)) blk: {
         const hdr = std.mem.bytesToValue(CmsgHdr, &control);
         if (hdr.cmsg_level == std.os.linux.SOL.SOCKET) {
             const fd: c_int = std.mem.bytesToValue(c_int, control[fd_cmsg.fd_cmsg_data_offs..][0..4]);
-            self.fd_list.pushNoClobber(fd) catch {
+
+            self.fd_pool.register(fd) catch {
                 std.log.err("Dropped file descriptor", .{});
                 std.posix.close(fd);
+                break :blk;
+            };
+
+            self.fd_list.pushNoClobber(fd) catch {
+                std.log.err("Dropped file descriptor", .{});
+                try self.fd_pool.close(fd);
+                break :blk;
             };
         }
     }

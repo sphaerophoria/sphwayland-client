@@ -5,11 +5,13 @@ const rendering = @import("../rendering.zig");
 const Bindings = @import("wayland_bindings");
 const wlio = @import("wlio");
 const CompositorState = @import("../CompositorState.zig");
+const FdPool = @import("../FdPool.zig");
 
 const Connection = @This();
 
 alloc: *sphtud.alloc.Sphalloc,
 connection: std.net.Server.Connection,
+fd_pool: *FdPool,
 
 stream_reader: *Reader,
 io_reader: *std.Io.Reader,
@@ -44,13 +46,17 @@ pub fn init(alloc: *sphtud.alloc.Sphalloc, connection: std.net.Server.Connection
     stream_writer.* = connection.stream.writer(try alloc.arena().alloc(u8, 4096));
     const io_writer = &stream_writer.interface;
 
+    const fd_pool = try alloc.arena().create(FdPool);
+    fd_pool.* = try .init(alloc, 8, 100);
+
     const stream_reader = try alloc.arena().create(Reader);
-    stream_reader.* = try Reader.init(alloc.arena(), connection.stream);
+    stream_reader.* = try Reader.init(alloc.arena(), fd_pool, connection.stream);
     const io_reader = &stream_reader.interface;
 
     return .{
         .alloc = alloc,
         .connection = connection,
+        .fd_pool = fd_pool,
         .stream_reader = stream_reader,
         .io_writer = io_writer,
         .io_reader = io_reader,
@@ -73,9 +79,21 @@ pub fn handler(self: *Connection) sphtud.event.Handler {
     };
 }
 
-pub fn releaseBuffer(self: *Connection, wl_buffer_id: u32) !void {
-    const wl_buffer = Bindings.WlBuffer{ .id = wl_buffer_id };
-    try wl_buffer.release(self.io_writer, .{});
+pub fn releaseBuffer(self: *Connection, wl_buffer_id: WlBufferId, surface_id: WlSurfaceId) !void {
+    const buffer = self.wl_buffers.get(wl_buffer_id) orelse return error.InvalidBuffer;
+
+    const wl_buf_iface = Bindings.WlBuffer{ .id = wl_buffer_id.inner };
+    try wl_buf_iface.release(self.io_writer, .{});
+
+    try self.wl_buffers.remove(wl_buffer_id);
+    try self.fd_pool.close(buffer.buf_params.fd);
+
+    const surface = self.wl_surfaces.getPtr(surface_id) orelse return error.InvalidSurface;
+    if (surface.buffer) |sb| {
+        if (sb.inner == wl_buffer_id.inner) {
+            surface.buffer = null;
+        }
+    }
 }
 
 pub fn requestFrame(self: *Connection, surface_id: WlSurfaceId) !void {
@@ -147,8 +165,8 @@ fn close(ctx: ?*anyopaque) void {
 
     // FIXME: All file descriptors should be attached to a pool and closed
 
+    self.fd_pool.closeAll();
     self.connection.stream.close();
-    // FIXME: Remove connection state from list
     self.alloc.deinit();
 }
 
@@ -263,7 +281,7 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
                     const buffer = self.wl_buffers.get(buf_id) orelse unreachable;
 
                     const render_buffer = rendering.RenderBuffer{
-                        .wl_buffer = buf_id.inner,
+                        .wl_buffer = buf_id,
                         .buf_fd = buffer.buf_params.fd,
                         .modifiers = buffer.buf_params.modifier,
                         .offset = buffer.buf_params.offset,

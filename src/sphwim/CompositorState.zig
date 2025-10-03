@@ -77,7 +77,7 @@ pub fn updateBuffers(self: *CompositorState) !void {
             continue;
         }
 
-        try metadata.connection.releaseBuffer(locked_buffer.buffer.wl_buffer);
+        try metadata.connection.releaseBuffer(locked_buffer.buffer.wl_buffer, metadata.surface);
         locked_buffer.buffer = next_buffer;
 
         try metadata.connection.requestFrame(metadata.surface);
