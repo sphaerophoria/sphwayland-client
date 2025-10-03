@@ -6,10 +6,9 @@ timer_expired: bool,
 const NullRenderBackend = @This();
 
 pub fn init(alloc: std.mem.Allocator) !rendering.RenderBackend {
-
-    const fd = try std.posix.timerfd_create( .MONOTONIC, .{});
+    const fd = try std.posix.timerfd_create(.MONOTONIC, .{});
     const now = try std.posix.clock_gettime(.MONOTONIC);
-    var next = std.posix.system.itimerspec {
+    var next = std.posix.system.itimerspec{
         .it_value = .{
             .sec = now.sec + 1,
             .nsec = now.nsec,

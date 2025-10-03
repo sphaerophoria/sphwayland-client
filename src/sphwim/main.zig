@@ -5,10 +5,9 @@ const wayland = @import("wayland.zig");
 const Bindings = @import("wayland_bindings");
 const CompositorState = @import("CompositorState.zig");
 
-pub const std_option = std.Options {
+pub const std_option = std.Options{
     .log_level = .warn,
 };
-
 
 // std.Io.Reader
 //  -- typical path just reads data as normal
@@ -25,10 +24,10 @@ fn createWaylandSocket(alloc: sphtud.alloc.LinearAllocator) !std.net.Server {
         const cp = alloc.checkpoint();
         defer alloc.restore(cp);
 
-        const path = try std.fmt.allocPrint(alloc.allocator(), "{s}/wayland-{d}", .{xdg_runtime_dir, idx});
+        const path = try std.fmt.allocPrint(alloc.allocator(), "{s}/wayland-{d}", .{ xdg_runtime_dir, idx });
 
         const addr = try std.net.Address.initUnix(path);
-        const ret =  addr.listen(.{
+        const ret = addr.listen(.{
             .reuse_address = false,
         }) catch |e| {
             switch (e) {
@@ -71,7 +70,7 @@ const VsyncHandler = struct {
     compositor_state: *CompositorState,
     last: std.time.Instant,
 
-    const vtable = sphtud.event.Handler.VTable {
+    const vtable = sphtud.event.Handler.VTable{
         .poll = poll,
         .close = close,
     };
@@ -97,7 +96,7 @@ const VsyncHandler = struct {
         const now = std.time.Instant.now() catch return .complete;
         defer self.last = now;
 
-        self.compositor_state.renderables.updateBuffers() catch return .complete;
+        self.compositor_state.updateBuffers() catch return .complete;
         var buffers = self.compositor_state.renderables.locked_buffers.iter();
         while (buffers.next()) |buffer| {
             std.log.debug("Rendering buffer with fd {d}", .{buffer.buf_fd});
@@ -135,9 +134,9 @@ pub fn main() !void {
 
     const render_backend = try rendering.initRenderBackend(root_alloc.arena());
 
-    var compositor_state = try CompositorState.init(&root_alloc);
+    var compositor_state = try CompositorState.init(&root_alloc, render_backend);
 
-    var vsync_handler = VsyncHandler {
+    var vsync_handler = VsyncHandler{
         .render_backend = render_backend,
         .last = try std.time.Instant.now(),
         .compositor_state = &compositor_state,

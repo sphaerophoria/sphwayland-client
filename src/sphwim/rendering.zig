@@ -20,9 +20,9 @@ pub const RenderBackend = struct {
     vtable: *const VTable,
 
     const VTable = struct {
-        wantsRender: *const fn(ctx: ?*anyopaque) bool,
-        displayBuffer: *const fn(ctx: ?*anyopaque, render_buffer: RenderBuffer) anyerror!void,
-        service: *const fn(ctx: ?*anyopaque, fd: std.posix.fd_t) anyerror!void,
+        wantsRender: *const fn (ctx: ?*anyopaque) bool,
+        displayBuffer: *const fn (ctx: ?*anyopaque, render_buffer: RenderBuffer) anyerror!void,
+        service: *const fn (ctx: ?*anyopaque, fd: std.posix.fd_t) anyerror!void,
     };
 
     pub fn wantsRender(self: RenderBackend) bool {
@@ -47,5 +47,4 @@ pub fn initRenderBackend(alloc: std.mem.Allocator) !RenderBackend {
 
     std.log.warn("Failed to init render backend, using null backend", .{});
     return try NullRenderBackend.init(alloc);
-
 }

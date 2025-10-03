@@ -4,15 +4,80 @@ const wayland = @import("wayland.zig");
 const rendering = @import("rendering.zig");
 
 renderables: Renderables,
+render_backend: rendering.RenderBackend,
 
 const CompositorState = @This();
 
-pub fn init(alloc: *sphtud.alloc.Sphalloc) !CompositorState {
+pub fn init(alloc: *sphtud.alloc.Sphalloc, render_backend: rendering.RenderBackend) !CompositorState {
     return .{
         .renderables = try .init(alloc),
+        .render_backend = render_backend,
     };
 }
 
+pub fn getMetadata(self: *CompositorState, handle: Renderables.Handle) *RenderableMetadata {
+    return self.renderables.metadata.getPtr(handle.inner);
+}
+
+pub fn pushRenderable(self: *CompositorState, connection: *wayland.Connection, surface: wayland.Connection.WlSurfaceId, buffer: rendering.RenderBuffer) !Renderables.Handle {
+    const renderable_id = self.renderables.metadata.len;
+    try self.renderables.metadata.append(.{
+        .connection = connection,
+        .surface = surface,
+        .next_buffer = buffer,
+    });
+
+    try self.renderables.locked_buffers.append(buffer);
+
+    std.debug.assert(self.renderables.locked_buffers.len == self.renderables.metadata.len);
+
+    try connection.requestFrame(surface);
+    try connection.io_writer.flush();
+
+    // Workaround for having no DRI wakeups cause we aren't rendering a background
+    if (renderable_id == 0) {
+        try self.render_backend.displayBuffer(buffer);
+    }
+
+    return .{ .inner = renderable_id };
+}
+
+pub fn removeRenderable(self: *CompositorState, handle: Renderables.Handle) void {
+    self.renderables.metadata.swapRemove(handle.inner);
+    // FIXME: Surely we should be closing the file handle
+    self.renderables.locked_buffers.swapRemove(handle.inner);
+
+    if (handle.inner < self.renderables.metadata.len) {
+        const moved = self.renderables.metadata.getPtr(handle.inner);
+        moved.connection.updateRenderableHandle(moved.surface, handle);
+    }
+}
+
+pub fn updateBuffers(self: *CompositorState) !void {
+    var metadata_it = self.renderables.metadata.iter();
+    var locked_it = self.renderables.locked_buffers.iter();
+
+    std.debug.assert(self.renderables.metadata.len == self.renderables.locked_buffers.len);
+
+    var i: usize = 0;
+    while (metadata_it.next()) |metadata| {
+        defer i += 1;
+
+        const locked_buffer = locked_it.next() orelse unreachable;
+
+        const next_buffer = metadata.next_buffer;
+
+        if (next_buffer.buf_fd == locked_buffer.buf_fd) {
+            continue;
+        }
+
+        try metadata.connection.releaseBuffer(locked_buffer.wl_buffer);
+        locked_buffer.* = next_buffer;
+
+        try metadata.connection.requestFrame(metadata.surface);
+        try metadata.connection.io_writer.flush();
+    }
+}
 pub const RenderableMetadata = struct {
     connection: *wayland.Connection,
     surface: wayland.Connection.WlSurfaceId,
@@ -44,64 +109,4 @@ pub const Renderables = struct {
     pub const Handle = struct {
         inner: usize,
     };
-
-    pub fn getMetadata(self: *Renderables, handle: Handle) *RenderableMetadata {
-        return self.metadata.getPtr(handle.inner);
-    }
-
-    pub fn pushRenderable(self: *Renderables, connection: *wayland.Connection, surface: wayland.Connection.WlSurfaceId, buffer: rendering.RenderBuffer) !Handle {
-        const renderable_id = self.metadata.len;
-        try self.metadata.append(.{
-            .connection = connection,
-            .surface = surface,
-            .next_buffer = buffer,
-        });
-
-        try self.locked_buffers.append(buffer);
-
-        std.debug.assert(self.locked_buffers.len == self.metadata.len);
-
-        try connection.requestFrame(surface);
-        try connection.io_writer.flush();
-
-        return .{ .inner = renderable_id };
-    }
-
-    pub fn removeRenderable(self: *Renderables, handle: Handle) void {
-        self.metadata.swapRemove(handle.inner);
-        // FIXME: Surely we should be closing the file handle
-        self.locked_buffers.swapRemove(handle.inner);
-
-        if (handle.inner < self.metadata.len) {
-            const moved = self.metadata.getPtr(handle.inner);
-            moved.connection.updateRenderableHandle(moved.surface, handle);
-        }
-    }
-
-    pub fn updateBuffers(self: *Renderables) !void {
-        var metadata_it = self.metadata.iter();
-        var locked_it = self.locked_buffers.iter();
-
-        std.debug.assert(self.metadata.len == self.locked_buffers.len);
-
-        var i: usize = 0;
-        while (metadata_it.next()) |metadata| {
-            defer i += 1;
-
-            const locked_buffer = locked_it.next() orelse unreachable;
-
-            const next_buffer = metadata.next_buffer;
-
-            if (next_buffer.buf_fd == locked_buffer.buf_fd) {
-                continue;
-            }
-
-            try metadata.connection.releaseBuffer(locked_buffer.wl_buffer);
-            locked_buffer.* = next_buffer;
-
-            try metadata.connection.requestFrame(metadata.surface);
-            try metadata.connection.io_writer.flush();
-        }
-    }
 };
-

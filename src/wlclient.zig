@@ -91,7 +91,7 @@ const CmsgHdr = extern struct {
 pub fn sendMessageWithFdAttachment(stream: std.net.Stream, msg: []const u8, fd: c_int) !void {
     const SCM_RIGHTS = 1;
     var cmsg_buf: [fd_cmsg.fd_cmsg_space]u8 = @splat(0);
-    const hdr = CmsgHdr {
+    const hdr = CmsgHdr{
         .cmsg_len = fd_cmsg.fd_cmsg_len,
         .cmsg_level = std.os.linux.SOL.SOCKET,
         .cmsg_type = SCM_RIGHTS,

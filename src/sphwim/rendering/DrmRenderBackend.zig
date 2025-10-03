@@ -16,7 +16,7 @@ page_flip_complete: bool = false,
 
 // FIXME: Deinit or file pool
 pub fn init(alloc: std.mem.Allocator) !rendering.RenderBackend {
-    const f = try std.fs.openFileAbsolute("/dev/dri/card0", .{
+    const f = try std.fs.openFileAbsolute("/dev/dri/card1", .{
         .mode = .read_write,
     });
 
@@ -67,7 +67,7 @@ fn service(ctx: ?*anyopaque, fd: std.posix.fd_t) !void {
 
 fn displayBuffer(ctx: ?*anyopaque, buffer: rendering.RenderBuffer) !void {
     const self: *Drm = @ptrCast(@alignCast(ctx));
-    var dri_prime_handle = c.drm_prime_handle {
+    var dri_prime_handle = c.drm_prime_handle{
         .flags = 0,
         .fd = buffer.buf_fd,
         .handle = 0,
@@ -76,7 +76,7 @@ fn displayBuffer(ctx: ?*anyopaque, buffer: rendering.RenderBuffer) !void {
     if (ret < 0) {
         return error.CreateHandle;
     }
-    std.debug.print("modifiers: {x}\n" ,.{buffer.modifiers});
+    std.debug.print("modifiers: {x}\n", .{buffer.modifiers});
 
     const plane_res = c.drmModeGetPlaneResources(self.dri_file.handle);
     if (plane_res == null) {
@@ -90,7 +90,7 @@ fn displayBuffer(ctx: ?*anyopaque, buffer: rendering.RenderBuffer) !void {
         const plane = c.drmModeGetPlane(self.dri_file.handle, plane_id);
         for (0..plane[0].count_formats) |i| {
             const as_chars = std.mem.asBytes(&plane[0].formats[i]);
-            std.debug.print("{d}: {s}\n", .{plane_id, as_chars});
+            std.debug.print("{d}: {s}\n", .{ plane_id, as_chars });
         }
     }
     var fb_id: u32 = undefined;
@@ -114,16 +114,15 @@ fn displayBuffer(ctx: ?*anyopaque, buffer: rendering.RenderBuffer) !void {
 
     // FIXME: Err check
     //if (self.last_fb_id) |_| {
-        self.page_flip_complete = false;
-        std.debug.print("Flipping our shit\n", .{});
-        _ = c.drmModePageFlip(self.dri_file.handle, self.crtc_id, fb_id, c.DRM_MODE_PAGE_FLIP_EVENT, &self.page_flip_complete);
+    self.page_flip_complete = false;
+    std.debug.print("Flipping our shit\n", .{});
+    _ = c.drmModePageFlip(self.dri_file.handle, self.crtc_id, fb_id, c.DRM_MODE_PAGE_FLIP_EVENT, &self.page_flip_complete);
     //} else {
     //    _ = c.drmModeSetCrtc(self.dri_file.handle, self.crtc_id, 0, 0, 0, null, 0, null);
     //    _ = c.drmModeSetCrtc(self.dri_file.handle, self.crtc_id, fb_id, 0, 0, &self.connector_id, 1, self.preferred_mode);
     //}
 
     self.last_fb_id = fb_id;
-
 }
 
 fn pageFlipHandler(fd: c_int, frame: c_uint, sec: c_uint, usec: c_uint, data: ?*anyopaque) callconv(.c) void {
@@ -137,11 +136,11 @@ fn pageFlipHandler(fd: c_int, frame: c_uint, sec: c_uint, usec: c_uint, data: ?*
     page_flip_complete.* = true;
 }
 
-
 fn getFirstConnectedConnector(f: std.fs.File, resources: *c.drmModeRes) ?*c.drmModeConnector {
     for (resources.connectors[0..@intCast(resources.count_connectors)]) |connector_id| {
         const connector: *c.drmModeConnector = c.drmModeGetConnectorCurrent(f.handle, connector_id) orelse continue;
 
+        std.debug.print("connector\n", .{});
         if (connector.connection == c.DRM_MODE_CONNECTED) {
             return connector;
         }
@@ -170,4 +169,3 @@ fn drawRect(data: []u32, stride: usize, x1: usize, y1: usize, x2: usize, y2: usi
         }
     }
 }
-

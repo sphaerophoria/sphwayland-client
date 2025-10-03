@@ -17,12 +17,12 @@ io_writer: *std.Io.Writer,
 // FIXME: WTF is the difference between state and us? Remove this...
 state: *State,
 
-const vtable = sphtud.event.Handler.VTable {
+const vtable = sphtud.event.Handler.VTable{
     .poll = poll,
     .close = close,
 };
 
-pub fn init(alloc: *sphtud.alloc.Sphalloc, connection: std.net.Server.Connection, compositor_state: *CompositorState,  render_backend: rendering.RenderBackend, connections: *sphtud.util.RuntimeSegmentedListSphalloc(State), renderable_id: usize) !Connection {
+pub fn init(alloc: *sphtud.alloc.Sphalloc, connection: std.net.Server.Connection, compositor_state: *CompositorState, render_backend: rendering.RenderBackend, connections: *sphtud.util.RuntimeSegmentedListSphalloc(State), renderable_id: usize) !Connection {
     const stream_writer = try alloc.arena().create(std.net.Stream.Writer);
     stream_writer.* = connection.stream.writer(try alloc.arena().alloc(u8, 4096));
     const io_writer = &stream_writer.interface;
@@ -43,7 +43,6 @@ pub fn init(alloc: *sphtud.alloc.Sphalloc, connection: std.net.Server.Connection
         .io_reader = io_reader,
         .io_writer = io_writer,
         .state = state,
-
     };
 }
 
@@ -56,14 +55,14 @@ pub fn handler(self: *Connection) sphtud.event.Handler {
 }
 
 pub fn releaseBuffer(self: *Connection, wl_buffer_id: u32) !void {
-    const wl_buffer = Bindings.WlBuffer { .id = wl_buffer_id };
+    const wl_buffer = Bindings.WlBuffer{ .id = wl_buffer_id };
     try wl_buffer.release(self.io_writer, .{});
 }
 
 pub fn requestFrame(self: *Connection, surface_id: WlSurfaceId) !void {
     const surface = self.state.wl_surfaces.get(surface_id) orelse return error.InvalidSurface;
     const callback_id = surface.callback_id orelse return;
-    const wl_callback = Bindings.WlCallback { .id = callback_id };
+    const wl_callback = Bindings.WlCallback{ .id = callback_id };
     try wl_callback.done(self.io_writer, .{
         .callback_data = 0,
     });
@@ -75,20 +74,19 @@ pub fn updateRenderableHandle(self: *Connection, surface: WlSurfaceId, handle: C
 
 fn poll(ctx: ?*anyopaque, _: *sphtud.event.Loop) sphtud.event.PollResult {
     const self: *Connection = @ptrCast(@alignCast(ctx));
-    self.pollError()  catch |e| {
+    self.pollError() catch |e| {
         switch (e) {
             error.ReadFailed => {
                 switch (self.stream_reader.last_res) {
                     .AGAIN => return .in_progress,
                     else => {
-                        std.log.err("Failure to read wl client {t} (stream {d}), {f}", .{e, self.stream_reader.last_res, @errorReturnTrace().?});
+                        std.log.err("Failure to read wl client {t} (stream {d}), {f}", .{ e, self.stream_reader.last_res, @errorReturnTrace().? });
                         return .complete;
-
                     },
                 }
             },
             else => {
-                std.log.err("Failure to handle wl client {t} {f}", .{e, @errorReturnTrace().?});
+                std.log.err("Failure to handle wl client {t} {f}", .{ e, @errorReturnTrace().? });
                 return .complete;
             },
         }
@@ -99,7 +97,6 @@ fn poll(ctx: ?*anyopaque, _: *sphtud.event.Loop) sphtud.event.PollResult {
 
 fn pollError(self: *Connection) !void {
     while (true) {
-
         const header = try self.io_reader.peekStruct(wlio.HeaderLE, .little);
         const data = (try self.io_reader.peek(header.size))[@sizeOf(wlio.HeaderLE)..];
         _ = try self.io_reader.discard(.limited(header.size));
@@ -125,7 +122,7 @@ fn close(ctx: ?*anyopaque) void {
     var surface_it = self.state.wl_surfaces.iter();
     while (surface_it.next()) |surface| {
         if (surface.val.handle) |h| {
-            self.state.compositor_state.renderables.removeRenderable(h);
+            self.state.compositor_state.removeRenderable(h);
         }
     }
 
@@ -139,7 +136,6 @@ fn close(ctx: ?*anyopaque) void {
 pub const XdgSurfaceId = struct { inner: u32 };
 pub const WlSurfaceId = struct { inner: u32 };
 pub const WlBufferId = struct { inner: u32 };
-
 
 pub const State = struct {
     alloc: *sphtud.alloc.Sphalloc,
@@ -183,7 +179,7 @@ pub const State = struct {
     }
 
     fn handleMessage(state: *State, self: *Connection, object_id: u32, req: Bindings.WaylandIncomingMessage, fd: ?std.posix.fd_t) !void {
-        const supported_interfaces: []const Bindings.WaylandInterfaceType= &.{
+        const supported_interfaces: []const Bindings.WaylandInterfaceType = &.{
             .wl_compositor,
             .xdg_wm_base,
             .zxdg_decoration_manager_v1,
@@ -191,11 +187,11 @@ pub const State = struct {
         };
 
         switch (req) {
-            .wl_display => |parsed| switch (parsed)  {
+            .wl_display => |parsed| switch (parsed) {
                 .get_registry => |params| {
                     try state.interface_registry.put(state.alloc.general(), params.registry, .wl_registry);
 
-                    const registry = Bindings.WlRegistry { .id = params.registry };
+                    const registry = Bindings.WlRegistry{ .id = params.registry };
                     for (supported_interfaces) |interface| {
                         try registry.global(state.io_writer, .{
                             .name = @intFromEnum(interface) + 1,
@@ -207,7 +203,7 @@ pub const State = struct {
                     try state.io_writer.flush();
                 },
                 .sync => |params| {
-                    const callback = Bindings.WlCallback { .id = params.callback };
+                    const callback = Bindings.WlCallback{ .id = params.callback };
                     try callback.done(state.io_writer, .{
                         .callback_data = 0,
                     });
@@ -218,14 +214,14 @@ pub const State = struct {
                 .bind => |params| {
                     // FIXME: These might have to be 0xff000000 or higher...
                     const interface: Bindings.WaylandInterfaceType = @enumFromInt(params.name - 1);
-                    try state.interface_registry.put(state.alloc.general(), params.id,  interface);
+                    try state.interface_registry.put(state.alloc.general(), params.id, interface);
                 },
             },
             .wl_compositor => |parsed| switch (parsed) {
                 .create_surface => |params| {
-                    const wl_surface_id = WlSurfaceId { .inner = params.id };
+                    const wl_surface_id = WlSurfaceId{ .inner = params.id };
                     try state.wl_surfaces.put(wl_surface_id, .{});
-                    try state.interface_registry.put(state.alloc.general(), params.id,  .wl_surface);
+                    try state.interface_registry.put(state.alloc.general(), params.id, .wl_surface);
                 },
                 else => {
                     logUnhandledRequest(object_id, req);
@@ -234,14 +230,14 @@ pub const State = struct {
             },
             .xdg_wm_base => |parsed| switch (parsed) {
                 .get_xdg_surface => |params| {
-                    const wl_surface_id = WlSurfaceId { .inner = params.surface };
+                    const wl_surface_id = WlSurfaceId{ .inner = params.surface };
 
-                    const xdg_id = XdgSurfaceId { .inner = params.id };
+                    const xdg_id = XdgSurfaceId{ .inner = params.id };
                     try state.xdg_surfaces.put(xdg_id, wl_surface_id);
 
                     try state.interface_registry.put(state.alloc.general(), params.id, .xdg_surface);
 
-                    var xdg_surf = Bindings.XdgSurface { .id = xdg_id.inner };
+                    var xdg_surf = Bindings.XdgSurface{ .id = xdg_id.inner };
                     try xdg_surf.configure(state.io_writer, .{
                         // FIXME: Random number that is confirmed in ack
                         .serial = 1234,
@@ -258,7 +254,7 @@ pub const State = struct {
                     try state.windows.insert(state.alloc.general(), params.id, .{
                         .alloc = try state.alloc.makeSubAlloc("window"),
                     });
-                    try state.interface_registry.put(state.alloc.general(), params.id,  .xdg_toplevel);
+                    try state.interface_registry.put(state.alloc.general(), params.id, .xdg_toplevel);
                 },
                 .ack_configure => {},
                 else => {
@@ -282,13 +278,13 @@ pub const State = struct {
             },
             .wl_surface => |parsed| switch (parsed) {
                 .commit => {
-                    const wl_surface_id = WlSurfaceId { .inner = object_id };
+                    const wl_surface_id = WlSurfaceId{ .inner = object_id };
                     const surface = state.wl_surfaces.getPtr(wl_surface_id) orelse return error.InvalidSurface;
 
                     if (surface.buffer) |buf_id| {
                         const buffer = state.wl_buffers.get(buf_id) orelse unreachable;
 
-                        const render_buffer = rendering.RenderBuffer {
+                        const render_buffer = rendering.RenderBuffer{
                             .wl_buffer = buf_id.inner,
                             .buf_fd = buffer.buf_params.fd,
                             .modifiers = buffer.buf_params.modifier,
@@ -301,23 +297,22 @@ pub const State = struct {
                         };
 
                         if (surface.handle) |h| {
-                            const metadata = state.compositor_state.renderables.getMetadata(h);
+                            const metadata = state.compositor_state.getMetadata(h);
                             metadata.next_buffer = render_buffer;
                         } else {
-                            surface.handle = try state.compositor_state.renderables.pushRenderable(self, wl_surface_id, render_buffer);
+                            surface.handle = try state.compositor_state.pushRenderable(self, wl_surface_id, render_buffer);
                         }
-
                     }
                 },
                 .frame => |params| {
-                    const wl_surface_id = WlSurfaceId { .inner = object_id };
+                    const wl_surface_id = WlSurfaceId{ .inner = object_id };
                     const surface = state.wl_surfaces.getPtr(wl_surface_id) orelse return error.InvalidSurface;
                     surface.callback_id = params.callback;
                 },
                 .attach => |params| {
-                    const wl_surface_id = WlSurfaceId { .inner = object_id };
+                    const wl_surface_id = WlSurfaceId{ .inner = object_id };
                     const surface = state.wl_surfaces.getPtr(wl_surface_id) orelse return error.InvalidSurface;
-                    surface.buffer = WlBufferId { .inner = params.buffer };
+                    surface.buffer = WlBufferId{ .inner = params.buffer };
                 },
                 else => {
                     logUnhandledRequest(object_id, req);
@@ -343,7 +338,7 @@ pub const State = struct {
                     const buf_params_opt = state.zwp_params.get(object_id) orelse return error.InvalidObject;
                     const buf_params = buf_params_opt orelse return error.EmptyZwpParams;
 
-                    const wl_buffer_id = WlBufferId { .inner = params.buffer_id };
+                    const wl_buffer_id = WlBufferId{ .inner = params.buffer_id };
                     try state.wl_buffers.put(wl_buffer_id, .{
                         .buf_params = buf_params,
                         .width = params.width,
@@ -381,7 +376,6 @@ pub const State = struct {
                 return;
             },
         }
-
     }
 };
 
@@ -397,8 +391,8 @@ const InterfaceRegistry = struct {
     }
 
     fn put(self: *InterfaceRegistry, alloc: std.mem.Allocator, object_id: u32, interface_type: Bindings.WaylandInterfaceType) !void {
-        std.log.debug("Registering {d} -> {t}", .{object_id, interface_type});
-        try self.inner.putNoClobber(alloc, object_id,  interface_type);
+        std.log.debug("Registering {d} -> {t}", .{ object_id, interface_type });
+        try self.inner.putNoClobber(alloc, object_id, interface_type);
     }
 
     fn get(self: *const InterfaceRegistry, object_id: u32) ?Bindings.WaylandInterfaceType {
@@ -421,7 +415,7 @@ fn parseRequest(op: u32, data: []const u8, interface: Bindings.WaylandInterfaceT
 }
 
 fn logUnhandledRequest(object_id: u32, req: Bindings.WaylandIncomingMessage) void {
-    std.log.warn("Unhandled request by object {d}, {any}", .{object_id, req});
+    std.log.warn("Unhandled request by object {d}, {any}", .{ object_id, req });
 }
 
 fn requiresFd(req: Bindings.WaylandIncomingMessage) bool {
@@ -430,15 +424,14 @@ fn requiresFd(req: Bindings.WaylandIncomingMessage) bool {
             const interface_message = @field(req, @tagName(t));
             if (@typeInfo(@TypeOf(interface_message)) == .@"struct") {
                 return false;
-
             }
             switch (interface_message) {
                 inline else => |_, t2| {
                     const concrete_message = @field(interface_message, @tagName(t2));
                     return @TypeOf(concrete_message).requires_fd;
-                }
+                },
             }
-        }
+        },
     }
 }
 
@@ -446,7 +439,6 @@ fn IndirectLookupRef(comptime T: type) type {
     return struct {
         storage: *std.ArrayList(T),
         mapping: std.AutoArrayHashMapUnmanaged(u32, usize),
-
 
         const Self = @This();
 
@@ -460,7 +452,7 @@ fn IndirectLookupRef(comptime T: type) type {
             return self.mapping.get(object_id);
         }
     };
- }
+}
 
 fn IndirectLookupOwned(comptime T: type) type {
     return struct {
@@ -499,7 +491,7 @@ fn IndirectLookupOwned(comptime T: type) type {
             return self.mapping.get(object_id);
         }
     };
- }
+}
 
 const Buffer = struct {
     buf_params: BufferParams,
@@ -516,7 +508,6 @@ const BufferParams = struct {
     stride: u32,
     modifier: u64,
 };
-
 
 const Surface = struct {
     buffer: ?WlBufferId = null,

@@ -528,10 +528,10 @@ fn anyEventCanBeParsed(incoming: []const Interface.RequestEvent) bool {
     return false;
 }
 
-const ZigBindingsWriter = struct  {
+const ZigBindingsWriter = struct {
     writer: *std.Io.Writer,
 
-    fn init(writer: *std.Io.Writer)  ZigBindingsWriter {
+    fn init(writer: *std.Io.Writer) ZigBindingsWriter {
         return .{
             .writer = writer,
         };
@@ -747,7 +747,7 @@ const ZigBindingsWriter = struct  {
         );
 
         for (interfaces) |interface| {
-            try self.writer.print("        .{s} => {d},\n", .{interface.name, interface.version});
+            try self.writer.print("        .{s} => {d},\n", .{ interface.name, interface.version });
         }
 
         try self.writer.writeAll(
@@ -773,7 +773,6 @@ const ZigBindingsWriter = struct  {
             }
 
             try self.writer.writeByte('\n');
-
 
             for (incoming) |event| {
                 try self.writeIncomingType(event);

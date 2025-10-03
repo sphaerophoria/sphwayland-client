@@ -35,7 +35,6 @@ pub fn main() !void {
     var model_renderer = try ModelRenderer.init(alloc);
     defer model_renderer.deinit();
 
-
     while (!(try window.service())) {
         if (window.wantsFrame()) {
             const window_size = try window.getSize();

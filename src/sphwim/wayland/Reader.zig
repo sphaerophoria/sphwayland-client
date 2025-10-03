@@ -17,7 +17,7 @@ pub fn init(alloc: std.mem.Allocator, socket: std.net.Stream) !Reader {
             // like an insanely large number for a single connection
             .items = try alloc.alloc(c_int, 100),
         },
-        .interface = std.Io.Reader {
+        .interface = std.Io.Reader{
             .buffer = try alloc.alloc(u8, 4096),
             .vtable = &.{
                 .stream = stream,
@@ -35,7 +35,7 @@ const CmsgHdr = extern struct {
     cmsg_type: c_int,
 };
 
-fn stream(r: *std.Io.Reader, writer: *std.Io.Writer, limit: std.Io.Limit) error{EndOfStream,ReadFailed,WriteFailed}!usize{
+fn stream(r: *std.Io.Reader, writer: *std.Io.Writer, limit: std.Io.Limit) error{ EndOfStream, ReadFailed, WriteFailed }!usize {
     const self: *Reader = @fieldParentPtr("interface", r);
     self.last_res = .SUCCESS;
 
@@ -46,7 +46,7 @@ fn stream(r: *std.Io.Reader, writer: *std.Io.Writer, limit: std.Io.Limit) error{
         .len = dest.len,
     }};
     var control: [fd_cmsg.fd_cmsg_space]u8 = undefined;
-    var msg_header = std.os.linux.msghdr {
+    var msg_header = std.os.linux.msghdr{
         .name = null,
         .namelen = 0,
         .iov = &iov,
@@ -57,10 +57,7 @@ fn stream(r: *std.Io.Reader, writer: *std.Io.Writer, limit: std.Io.Limit) error{
     };
 
     // FIXME: Read many
-    const ret = std.os.linux.recvmsg(
-        self.socket.handle,
-        &msg_header,
-        0);
+    const ret = std.os.linux.recvmsg(self.socket.handle, &msg_header, 0);
 
     if (ret == 0) return error.EndOfStream;
 
