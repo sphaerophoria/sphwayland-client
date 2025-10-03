@@ -91,7 +91,7 @@ pub const Window = struct {
 
         const bound_interfaces = try bindInterfaces(&client);
 
-        var gbm_context = try system.GbmContext.init(640, 480);
+        var gbm_context = try system.GbmContext.init(1920, 1080);
         errdefer gbm_context.deinit();
 
         var egl_context = try system.EglContext.init(alloc, gbm_context);

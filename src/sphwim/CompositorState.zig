@@ -46,9 +46,14 @@ pub fn pushRenderable(self: *CompositorState, connection: *wayland.Connection, s
 pub fn removeRenderable(self: *CompositorState, handle: Renderables.Handle) void {
     self.renderables.metadata.swapRemove(handle.inner);
 
-    // FIXME: Surely we should be closing the file handle
-    // FIXME: The locked flag might still be in use by the DRM subsystem, so we
+    // FIXME FIXME FIXME
+    //
+    // The locked flag might still be in use by the DRM subsystem, so we
     // should probably queue for removal when the buffer unlocks
+    if (self.renderables.locked_buffers.get(handle.inner).locked) {
+        std.log.warn("WARNING: Likely removing memory still in use by DRM", .{});
+    }
+
     self.renderables.locked_buffers.swapRemove(handle.inner);
 
     if (handle.inner < self.renderables.metadata.len) {

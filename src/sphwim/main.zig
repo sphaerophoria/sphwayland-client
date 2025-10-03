@@ -9,12 +9,6 @@ pub const std_option = std.Options{
     .log_level = .warn,
 };
 
-// std.Io.Reader
-//  -- typical path just reads data as normal
-//    * Cannot use read()
-//  * Check for  file descriptors
-//  * Put them out of band somewhere
-
 fn createWaylandSocket(alloc: sphtud.alloc.LinearAllocator) !std.net.Server {
     const xdg_runtime_dir = std.posix.getenv("XDG_RUNTIME_DIR") orelse return error.NoXdgRuntime;
 

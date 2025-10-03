@@ -45,7 +45,7 @@ pub const GbmContext = struct {
         init_height: u32,
     ) !GbmContext {
         // Would be nice if user could choose
-        const device_path = "/dev/dri/card0";
+        const device_path = "/dev/dri/renderD128";
         const f = try std.fs.openFileAbsolute(device_path, .{ .mode = .read_write });
         errdefer f.close();
 

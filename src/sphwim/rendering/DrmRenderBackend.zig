@@ -12,10 +12,11 @@ dri_file: std.fs.File,
 connector_id: u32,
 preferred_mode: *c.drmModeModeInfo,
 first_service: bool = true,
+crtc_set: bool = false,
 
 // FIXME: Deinit or file pool
 pub fn init(alloc: std.mem.Allocator) !rendering.RenderBackend {
-    const f = try std.fs.openFileAbsolute("/dev/dri/card0", .{
+    const f = try std.fs.openFileAbsolute("/dev/dri/card1", .{
         .mode = .read_write,
     });
 
@@ -26,7 +27,10 @@ pub fn init(alloc: std.mem.Allocator) !rendering.RenderBackend {
     const encoder: *c.drmModeEncoder = c.drmModeGetEncoder(f.handle, connector.encoder_id) orelse return error.NoEncoder;
     const crtc: *c.drmModeCrtc = c.drmModeGetCrtc(f.handle, encoder.crtc_id) orelse return error.NoEncoder;
 
-    _ = c.drmModeSetCrtc(f.handle, crtc.crtc_id, 0, 0, 0, &connector.connector_id, 1, preferred_mode);
+    if (c.drmSetMaster(f.handle) != 0) return error.SetMaster;
+    if (c.drmModeSetCrtc(f.handle, crtc.crtc_id, 0, 0, 0, 0, 0, 0) != 0) return error.BlankScreen;
+    std.debug.print("{d}x{d}\n", .{preferred_mode.hdisplay, preferred_mode.vdisplay});
+    //if (c.drmModeSetCrtc(f.handle, crtc.crtc_id, 0, 0, 0, &connector.connector_id, 1, preferred_mode) != 0) return error.SetMode;
 
     const ret = try alloc.create(Drm);
     ret.* = .{
@@ -73,23 +77,7 @@ fn displayBuffer(ctx: ?*anyopaque, buffer: rendering.RenderBuffer, locked_flag: 
     if (ret < 0) {
         return error.CreateHandle;
     }
-    std.debug.print("modifiers: {x}\n", .{buffer.modifiers});
 
-    const plane_res = c.drmModeGetPlaneResources(self.dri_file.handle);
-    if (plane_res == null) {
-        const errno = std.c._errno();
-        std.debug.print("err code: {d}\n", .{errno.*});
-        return error.GetPlanes;
-    }
-    std.debug.print("Foudn {d} planes\n", .{plane_res[0].count_planes});
-    for (0..plane_res[0].count_planes) |res_idx| {
-        const plane_id = plane_res[0].planes[res_idx];
-        const plane = c.drmModeGetPlane(self.dri_file.handle, plane_id);
-        for (0..plane[0].count_formats) |i| {
-            const as_chars = std.mem.asBytes(&plane[0].formats[i]);
-            std.debug.print("{d}: {s}\n", .{ plane_id, as_chars });
-        }
-    }
     var fb_id: u32 = undefined;
     var handles: [4]u32 = @splat(0);
     var strides: [4]u32 = @splat(0);
@@ -110,8 +98,12 @@ fn displayBuffer(ctx: ?*anyopaque, buffer: rendering.RenderBuffer, locked_flag: 
     }
 
     locked_flag.* = true;
-    // FIXME: Err check
-    _ = c.drmModePageFlip(self.dri_file.handle, self.crtc_id, fb_id, c.DRM_MODE_PAGE_FLIP_EVENT, locked_flag);
+
+    if (!self.crtc_set) {
+        if (c.drmModeSetCrtc(self.dri_file.handle, self.crtc_id, fb_id, 0, 0, &self.connector_id, 1, self.preferred_mode) != 0) return error.SetMode;
+        self.crtc_set = true;
+    }
+    if (c.drmModePageFlip(self.dri_file.handle, self.crtc_id, fb_id, c.DRM_MODE_PAGE_FLIP_EVENT, locked_flag) != 0) return error.PageFlip;
 }
 
 fn pageFlipHandler(fd: c_int, frame: c_uint, sec: c_uint, usec: c_uint, data: ?*anyopaque) callconv(.c) void {
@@ -119,8 +111,6 @@ fn pageFlipHandler(fd: c_int, frame: c_uint, sec: c_uint, usec: c_uint, data: ?*
     _ = frame;
     _ = sec;
     _ = usec;
-
-    std.debug.print("Page flip handler time baybeee\n", .{});
     const locked: *bool = @ptrCast(@alignCast(data));
     locked.* = false;
 }
@@ -129,7 +119,6 @@ fn getFirstConnectedConnector(f: std.fs.File, resources: *c.drmModeRes) ?*c.drmM
     for (resources.connectors[0..@intCast(resources.count_connectors)]) |connector_id| {
         const connector: *c.drmModeConnector = c.drmModeGetConnectorCurrent(f.handle, connector_id) orelse continue;
 
-        std.debug.print("connector\n", .{});
         if (connector.connection == c.DRM_MODE_CONNECTED) {
             return connector;
         }
