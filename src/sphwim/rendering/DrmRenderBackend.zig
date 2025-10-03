@@ -29,7 +29,7 @@ pub fn init(alloc: std.mem.Allocator) !rendering.RenderBackend {
 
     if (c.drmSetMaster(f.handle) != 0) return error.SetMaster;
     if (c.drmModeSetCrtc(f.handle, crtc.crtc_id, 0, 0, 0, 0, 0, 0) != 0) return error.BlankScreen;
-    std.debug.print("{d}x{d}\n", .{preferred_mode.hdisplay, preferred_mode.vdisplay});
+    std.debug.print("{d}x{d}\n", .{ preferred_mode.hdisplay, preferred_mode.vdisplay });
     //if (c.drmModeSetCrtc(f.handle, crtc.crtc_id, 0, 0, 0, &connector.connector_id, 1, preferred_mode) != 0) return error.SetMode;
 
     const ret = try alloc.create(Drm);
