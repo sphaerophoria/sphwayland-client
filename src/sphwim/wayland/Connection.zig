@@ -14,15 +14,32 @@ connection: std.net.Server.Connection,
 stream_reader: *Reader,
 io_reader: *std.Io.Reader,
 io_writer: *std.Io.Writer,
-// FIXME: WTF is the difference between state and us? Remove this...
-state: *State,
+
+compositor_state: *CompositorState,
+
+interface_registry: InterfaceRegistry,
+wl_surfaces: sphtud.util.AutoHashMapSphalloc(WlSurfaceId, Surface),
+wl_buffers: sphtud.util.AutoHashMapSphalloc(WlBufferId, Buffer),
+
+zwp_params: IndirectLookupOwned(?BufferParams),
+
+xdg_surfaces: sphtud.util.AutoHashMapSphalloc(XdgSurfaceId, WlSurfaceId),
+windows: IndirectLookupOwned(Window),
+
+render_backend: rendering.RenderBackend,
+
+const typical_surfaces = 8;
+const max_surfaces = 100;
+
+const typical_buffers = typical_surfaces * 2;
+const max_buffers = max_surfaces * 2;
 
 const vtable = sphtud.event.Handler.VTable{
     .poll = poll,
     .close = close,
 };
 
-pub fn init(alloc: *sphtud.alloc.Sphalloc, connection: std.net.Server.Connection, compositor_state: *CompositorState, render_backend: rendering.RenderBackend, connections: *sphtud.util.RuntimeSegmentedListSphalloc(State), renderable_id: usize) !Connection {
+pub fn init(alloc: *sphtud.alloc.Sphalloc, connection: std.net.Server.Connection, compositor_state: *CompositorState, render_backend: rendering.RenderBackend) !Connection {
     const stream_writer = try alloc.arena().create(std.net.Stream.Writer);
     stream_writer.* = connection.stream.writer(try alloc.arena().alloc(u8, 4096));
     const io_writer = &stream_writer.interface;
@@ -31,18 +48,20 @@ pub fn init(alloc: *sphtud.alloc.Sphalloc, connection: std.net.Server.Connection
     stream_reader.* = try Reader.init(alloc.arena(), connection.stream);
     const io_reader = &stream_reader.interface;
 
-    try connections.append(undefined);
-    const state = connections.getPtr(connections.len - 1);
-
-    try state.initPinned(alloc, render_backend, compositor_state, renderable_id, io_writer);
-
     return .{
         .alloc = alloc,
         .connection = connection,
         .stream_reader = stream_reader,
-        .io_reader = io_reader,
         .io_writer = io_writer,
-        .state = state,
+        .io_reader = io_reader,
+        .compositor_state = compositor_state,
+        .interface_registry = try .init(alloc.general()),
+        .wl_surfaces = try .init(alloc.arena(), alloc.block_alloc.allocator(), typical_surfaces, max_surfaces),
+        .xdg_surfaces = try .init(alloc.arena(), alloc.block_alloc.allocator(), typical_surfaces, max_surfaces),
+        .windows = .init(),
+        .wl_buffers = try .init(alloc.arena(), alloc.block_alloc.allocator(), typical_surfaces, max_surfaces),
+        .zwp_params = .init(),
+        .render_backend = render_backend,
     };
 }
 
@@ -60,7 +79,7 @@ pub fn releaseBuffer(self: *Connection, wl_buffer_id: u32) !void {
 }
 
 pub fn requestFrame(self: *Connection, surface_id: WlSurfaceId) !void {
-    const surface = self.state.wl_surfaces.get(surface_id) orelse return error.InvalidSurface;
+    const surface = self.wl_surfaces.get(surface_id) orelse return error.InvalidSurface;
     const callback_id = surface.callback_id orelse return;
     const wl_callback = Bindings.WlCallback{ .id = callback_id };
     try wl_callback.done(self.io_writer, .{
@@ -69,7 +88,7 @@ pub fn requestFrame(self: *Connection, surface_id: WlSurfaceId) !void {
 }
 
 pub fn updateRenderableHandle(self: *Connection, surface: WlSurfaceId, handle: CompositorState.Renderables.Handle) void {
-    self.state.wl_surfaces.getPtr(surface).?.handle = handle;
+    self.wl_surfaces.getPtr(surface).?.handle = handle;
 }
 
 fn poll(ctx: ?*anyopaque, _: *sphtud.event.Loop) sphtud.event.PollResult {
@@ -101,7 +120,7 @@ fn pollError(self: *Connection) !void {
         const data = (try self.io_reader.peek(header.size))[@sizeOf(wlio.HeaderLE)..];
         _ = try self.io_reader.discard(.limited(header.size));
 
-        const req = try parseRequest(header.op, data, self.state.interface_registry.get(header.id) orelse return error.InvalidInterface);
+        const req = try parseRequest(header.op, data, self.interface_registry.get(header.id) orelse return error.InvalidInterface);
 
         var fd: ?std.posix.fd_t = null;
         // FIXME: Impl
@@ -113,16 +132,16 @@ fn pollError(self: *Connection) !void {
             fd = self.stream_reader.fd_list.pop() orelse unreachable;
         }
 
-        try self.state.handleMessage(self, header.id, req, fd);
+        try self.handleMessage(header.id, req, fd);
     }
 }
 
 fn close(ctx: ?*anyopaque) void {
     const self: *Connection = @ptrCast(@alignCast(ctx));
-    var surface_it = self.state.wl_surfaces.iter();
+    var surface_it = self.wl_surfaces.iter();
     while (surface_it.next()) |surface| {
         if (surface.val.handle) |h| {
-            self.state.compositor_state.removeRenderable(h);
+            self.compositor_state.removeRenderable(h);
         }
     }
 
@@ -137,247 +156,205 @@ pub const XdgSurfaceId = struct { inner: u32 };
 pub const WlSurfaceId = struct { inner: u32 };
 pub const WlBufferId = struct { inner: u32 };
 
-pub const State = struct {
-    alloc: *sphtud.alloc.Sphalloc,
-    io_writer: *std.Io.Writer,
-    compositor_state: *CompositorState,
-    renderable_id: usize,
+fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomingMessage, fd: ?std.posix.fd_t) !void {
+    const supported_interfaces: []const Bindings.WaylandInterfaceType = &.{
+        .wl_compositor,
+        .xdg_wm_base,
+        .zxdg_decoration_manager_v1,
+        .zwp_linux_dmabuf_v1,
+    };
 
-    interface_registry: InterfaceRegistry,
-    wl_surfaces: sphtud.util.AutoHashMapSphalloc(WlSurfaceId, Surface),
-    wl_buffers: sphtud.util.AutoHashMapSphalloc(WlBufferId, Buffer),
+    switch (req) {
+        .wl_display => |parsed| switch (parsed) {
+            .get_registry => |params| {
+                try self.interface_registry.put(self.alloc.general(), params.registry, .wl_registry);
 
-    zwp_params: IndirectLookupOwned(?BufferParams),
-
-    xdg_surfaces: sphtud.util.AutoHashMapSphalloc(XdgSurfaceId, WlSurfaceId),
-    windows: IndirectLookupOwned(Window),
-
-    render_backend: rendering.RenderBackend,
-
-    const typical_surfaces = 8;
-    const max_surfaces = 100;
-
-    const typical_buffers = typical_surfaces * 2;
-    const max_buffers = max_surfaces * 2;
-
-    fn initPinned(self: *State, alloc: *sphtud.alloc.Sphalloc, render_backend: rendering.RenderBackend, compositor_state: *CompositorState, renderable_id: usize, io_writer: *std.Io.Writer) !void {
-        self.* = .{
-            .alloc = alloc,
-            .io_writer = io_writer,
-            .compositor_state = compositor_state,
-            .renderable_id = renderable_id,
-            .interface_registry = try .init(alloc.general()),
-            .wl_surfaces = try .init(alloc.arena(), alloc.block_alloc.allocator(), typical_surfaces, max_surfaces),
-            .xdg_surfaces = undefined,
-            .windows = .init(),
-            .wl_buffers = try .init(alloc.arena(), alloc.block_alloc.allocator(), typical_surfaces, max_surfaces),
-            .zwp_params = .init(),
-            .render_backend = render_backend,
-        };
-
-        self.xdg_surfaces = try .init(alloc.arena(), alloc.block_alloc.allocator(), typical_surfaces, max_surfaces);
-    }
-
-    fn handleMessage(state: *State, self: *Connection, object_id: u32, req: Bindings.WaylandIncomingMessage, fd: ?std.posix.fd_t) !void {
-        const supported_interfaces: []const Bindings.WaylandInterfaceType = &.{
-            .wl_compositor,
-            .xdg_wm_base,
-            .zxdg_decoration_manager_v1,
-            .zwp_linux_dmabuf_v1,
-        };
-
-        switch (req) {
-            .wl_display => |parsed| switch (parsed) {
-                .get_registry => |params| {
-                    try state.interface_registry.put(state.alloc.general(), params.registry, .wl_registry);
-
-                    const registry = Bindings.WlRegistry{ .id = params.registry };
-                    for (supported_interfaces) |interface| {
-                        try registry.global(state.io_writer, .{
-                            .name = @intFromEnum(interface) + 1,
-                            .interface = @tagName(interface),
-                            .version = Bindings.getInterfaceVersion(interface),
-                        });
-                    }
-
-                    try state.io_writer.flush();
-                },
-                .sync => |params| {
-                    const callback = Bindings.WlCallback{ .id = params.callback };
-                    try callback.done(state.io_writer, .{
-                        .callback_data = 0,
+                const registry = Bindings.WlRegistry{ .id = params.registry };
+                for (supported_interfaces) |interface| {
+                    try registry.global(self.io_writer, .{
+                        .name = @intFromEnum(interface) + 1,
+                        .interface = @tagName(interface),
+                        .version = Bindings.getInterfaceVersion(interface),
                     });
-                    try state.io_writer.flush();
-                },
-            },
-            .wl_registry => |parsed| switch (parsed) {
-                .bind => |params| {
-                    // FIXME: These might have to be 0xff000000 or higher...
-                    const interface: Bindings.WaylandInterfaceType = @enumFromInt(params.name - 1);
-                    try state.interface_registry.put(state.alloc.general(), params.id, interface);
-                },
-            },
-            .wl_compositor => |parsed| switch (parsed) {
-                .create_surface => |params| {
-                    const wl_surface_id = WlSurfaceId{ .inner = params.id };
-                    try state.wl_surfaces.put(wl_surface_id, .{});
-                    try state.interface_registry.put(state.alloc.general(), params.id, .wl_surface);
-                },
-                else => {
-                    logUnhandledRequest(object_id, req);
-                    return;
-                },
-            },
-            .xdg_wm_base => |parsed| switch (parsed) {
-                .get_xdg_surface => |params| {
-                    const wl_surface_id = WlSurfaceId{ .inner = params.surface };
+                }
 
-                    const xdg_id = XdgSurfaceId{ .inner = params.id };
-                    try state.xdg_surfaces.put(xdg_id, wl_surface_id);
-
-                    try state.interface_registry.put(state.alloc.general(), params.id, .xdg_surface);
-
-                    var xdg_surf = Bindings.XdgSurface{ .id = xdg_id.inner };
-                    try xdg_surf.configure(state.io_writer, .{
-                        // FIXME: Random number that is confirmed in ack
-                        .serial = 1234,
-                    });
-                    try state.io_writer.flush();
-                },
-                else => {
-                    logUnhandledRequest(object_id, req);
-                    return;
-                },
+                try self.io_writer.flush();
             },
-            .xdg_surface => |parsed| switch (parsed) {
-                .get_toplevel => |params| {
-                    try state.windows.insert(state.alloc.general(), params.id, .{
-                        .alloc = try state.alloc.makeSubAlloc("window"),
-                    });
-                    try state.interface_registry.put(state.alloc.general(), params.id, .xdg_toplevel);
-                },
-                .ack_configure => {},
-                else => {
-                    logUnhandledRequest(object_id, req);
-                    return;
-                },
+            .sync => |params| {
+                const callback = Bindings.WlCallback{ .id = params.callback };
+                try callback.done(self.io_writer, .{
+                    .callback_data = 0,
+                });
+                try self.io_writer.flush();
             },
-            .xdg_toplevel => |parsed| switch (parsed) {
-                .set_title => |params| {
-                    const window = state.windows.getPtr(object_id) orelse return error.InvalidWindow;
-                    try window.setTitle(params.title);
-                },
-                .set_app_id => |params| {
-                    const window = state.windows.getPtr(object_id) orelse return error.InvalidWindow;
-                    try window.setAppId(params.app_id);
-                },
-                else => {
-                    logUnhandledRequest(object_id, req);
-                    return;
-                },
+        },
+        .wl_registry => |parsed| switch (parsed) {
+            .bind => |params| {
+                // FIXME: These might have to be 0xff000000 or higher...
+                const interface: Bindings.WaylandInterfaceType = @enumFromInt(params.name - 1);
+                try self.interface_registry.put(self.alloc.general(), params.id, interface);
             },
-            .wl_surface => |parsed| switch (parsed) {
-                .commit => {
-                    const wl_surface_id = WlSurfaceId{ .inner = object_id };
-                    const surface = state.wl_surfaces.getPtr(wl_surface_id) orelse return error.InvalidSurface;
-
-                    if (surface.buffer) |buf_id| {
-                        const buffer = state.wl_buffers.get(buf_id) orelse unreachable;
-
-                        const render_buffer = rendering.RenderBuffer{
-                            .wl_buffer = buf_id.inner,
-                            .buf_fd = buffer.buf_params.fd,
-                            .modifiers = buffer.buf_params.modifier,
-                            .offset = buffer.buf_params.offset,
-                            .plane_idx = buffer.buf_params.plane_idx,
-                            .stride = buffer.buf_params.stride,
-                            .width = buffer.width,
-                            .height = buffer.height,
-                            .format = buffer.format,
-                        };
-
-                        if (surface.handle) |h| {
-                            const metadata = state.compositor_state.getMetadata(h);
-                            metadata.next_buffer = render_buffer;
-                        } else {
-                            surface.handle = try state.compositor_state.pushRenderable(self, wl_surface_id, render_buffer);
-                        }
-                    }
-                },
-                .frame => |params| {
-                    const wl_surface_id = WlSurfaceId{ .inner = object_id };
-                    const surface = state.wl_surfaces.getPtr(wl_surface_id) orelse return error.InvalidSurface;
-                    surface.callback_id = params.callback;
-                },
-                .attach => |params| {
-                    const wl_surface_id = WlSurfaceId{ .inner = object_id };
-                    const surface = state.wl_surfaces.getPtr(wl_surface_id) orelse return error.InvalidSurface;
-                    surface.buffer = WlBufferId{ .inner = params.buffer };
-                },
-                else => {
-                    logUnhandledRequest(object_id, req);
-                    return;
-                },
-            },
-            .zwp_linux_buffer_params_v1 => |parsed| switch (parsed) {
-                .add => |params| {
-                    const buf_params = state.zwp_params.getPtr(object_id) orelse return error.InvalidObject;
-                    var modifier: u64 = params.modifier_hi;
-                    modifier <<= 32;
-                    modifier |= params.modifier_lo;
-
-                    buf_params.* = .{
-                        .fd = fd.?,
-                        .plane_idx = params.plane_idx,
-                        .offset = params.offset,
-                        .stride = params.stride,
-                        .modifier = modifier,
-                    };
-                },
-                .create_immed => |params| {
-                    const buf_params_opt = state.zwp_params.get(object_id) orelse return error.InvalidObject;
-                    const buf_params = buf_params_opt orelse return error.EmptyZwpParams;
-
-                    const wl_buffer_id = WlBufferId{ .inner = params.buffer_id };
-                    try state.wl_buffers.put(wl_buffer_id, .{
-                        .buf_params = buf_params,
-                        .width = params.width,
-                        .height = params.height,
-                        .format = params.format,
-                        .flags = params.flags,
-                    });
-                },
-                else => {
-                    logUnhandledRequest(object_id, req);
-                    return;
-                },
-            },
-            .zwp_linux_dmabuf_v1 => |parsed| switch (parsed) {
-                .create_params => |params| {
-                    try state.zwp_params.insert(state.alloc.general(), params.params_id, null);
-                    try state.interface_registry.put(state.alloc.general(), params.params_id, .zwp_linux_buffer_params_v1);
-                },
-                else => {
-                    logUnhandledRequest(object_id, req);
-                    return;
-                },
-            },
-            .zxdg_decoration_manager_v1 => |parsed| switch (parsed) {
-                .get_toplevel_decoration => |_| {
-                    logUnhandledRequest(object_id, req);
-                },
-                else => {
-                    logUnhandledRequest(object_id, req);
-                    return;
-                },
+        },
+        .wl_compositor => |parsed| switch (parsed) {
+            .create_surface => |params| {
+                const wl_surface_id = WlSurfaceId{ .inner = params.id };
+                try self.wl_surfaces.put(wl_surface_id, .{});
+                try self.interface_registry.put(self.alloc.general(), params.id, .wl_surface);
             },
             else => {
                 logUnhandledRequest(object_id, req);
                 return;
             },
-        }
+        },
+        .xdg_wm_base => |parsed| switch (parsed) {
+            .get_xdg_surface => |params| {
+                const wl_surface_id = WlSurfaceId{ .inner = params.surface };
+
+                const xdg_id = XdgSurfaceId{ .inner = params.id };
+                try self.xdg_surfaces.put(xdg_id, wl_surface_id);
+
+                try self.interface_registry.put(self.alloc.general(), params.id, .xdg_surface);
+
+                var xdg_surf = Bindings.XdgSurface{ .id = xdg_id.inner };
+                try xdg_surf.configure(self.io_writer, .{
+                    // FIXME: Random number that is confirmed in ack
+                    .serial = 1234,
+                });
+                try self.io_writer.flush();
+            },
+            else => {
+                logUnhandledRequest(object_id, req);
+                return;
+            },
+        },
+        .xdg_surface => |parsed| switch (parsed) {
+            .get_toplevel => |params| {
+                try self.windows.insert(self.alloc.general(), params.id, .{
+                    .alloc = try self.alloc.makeSubAlloc("window"),
+                });
+                try self.interface_registry.put(self.alloc.general(), params.id, .xdg_toplevel);
+            },
+            .ack_configure => {},
+            else => {
+                logUnhandledRequest(object_id, req);
+                return;
+            },
+        },
+        .xdg_toplevel => |parsed| switch (parsed) {
+            .set_title => |params| {
+                const window = self.windows.getPtr(object_id) orelse return error.InvalidWindow;
+                try window.setTitle(params.title);
+            },
+            .set_app_id => |params| {
+                const window = self.windows.getPtr(object_id) orelse return error.InvalidWindow;
+                try window.setAppId(params.app_id);
+            },
+            else => {
+                logUnhandledRequest(object_id, req);
+                return;
+            },
+        },
+        .wl_surface => |parsed| switch (parsed) {
+            .commit => {
+                const wl_surface_id = WlSurfaceId{ .inner = object_id };
+                const surface = self.wl_surfaces.getPtr(wl_surface_id) orelse return error.InvalidSurface;
+
+                if (surface.buffer) |buf_id| {
+                    const buffer = self.wl_buffers.get(buf_id) orelse unreachable;
+
+                    const render_buffer = rendering.RenderBuffer{
+                        .wl_buffer = buf_id.inner,
+                        .buf_fd = buffer.buf_params.fd,
+                        .modifiers = buffer.buf_params.modifier,
+                        .offset = buffer.buf_params.offset,
+                        .plane_idx = buffer.buf_params.plane_idx,
+                        .stride = buffer.buf_params.stride,
+                        .width = buffer.width,
+                        .height = buffer.height,
+                        .format = buffer.format,
+                    };
+
+                    if (surface.handle) |h| {
+                        const metadata = self.compositor_state.getMetadata(h);
+                        metadata.next_buffer = render_buffer;
+                    } else {
+                        surface.handle = try self.compositor_state.pushRenderable(self, wl_surface_id, render_buffer);
+                    }
+                }
+            },
+            .frame => |params| {
+                const wl_surface_id = WlSurfaceId{ .inner = object_id };
+                const surface = self.wl_surfaces.getPtr(wl_surface_id) orelse return error.InvalidSurface;
+                surface.callback_id = params.callback;
+            },
+            .attach => |params| {
+                const wl_surface_id = WlSurfaceId{ .inner = object_id };
+                const surface = self.wl_surfaces.getPtr(wl_surface_id) orelse return error.InvalidSurface;
+                surface.buffer = WlBufferId{ .inner = params.buffer };
+            },
+            else => {
+                logUnhandledRequest(object_id, req);
+                return;
+            },
+        },
+        .zwp_linux_buffer_params_v1 => |parsed| switch (parsed) {
+            .add => |params| {
+                const buf_params = self.zwp_params.getPtr(object_id) orelse return error.InvalidObject;
+                var modifier: u64 = params.modifier_hi;
+                modifier <<= 32;
+                modifier |= params.modifier_lo;
+
+                buf_params.* = .{
+                    .fd = fd.?,
+                    .plane_idx = params.plane_idx,
+                    .offset = params.offset,
+                    .stride = params.stride,
+                    .modifier = modifier,
+                };
+            },
+            .create_immed => |params| {
+                const buf_params_opt = self.zwp_params.get(object_id) orelse return error.InvalidObject;
+                const buf_params = buf_params_opt orelse return error.EmptyZwpParams;
+
+                const wl_buffer_id = WlBufferId{ .inner = params.buffer_id };
+                try self.wl_buffers.put(wl_buffer_id, .{
+                    .buf_params = buf_params,
+                    .width = params.width,
+                    .height = params.height,
+                    .format = params.format,
+                    .flags = params.flags,
+                });
+            },
+            else => {
+                logUnhandledRequest(object_id, req);
+                return;
+            },
+        },
+        .zwp_linux_dmabuf_v1 => |parsed| switch (parsed) {
+            .create_params => |params| {
+                try self.zwp_params.insert(self.alloc.general(), params.params_id, null);
+                try self.interface_registry.put(self.alloc.general(), params.params_id, .zwp_linux_buffer_params_v1);
+            },
+            else => {
+                logUnhandledRequest(object_id, req);
+                return;
+            },
+        },
+        .zxdg_decoration_manager_v1 => |parsed| switch (parsed) {
+            .get_toplevel_decoration => |_| {
+                logUnhandledRequest(object_id, req);
+            },
+            else => {
+                logUnhandledRequest(object_id, req);
+                return;
+            },
+        },
+        else => {
+            logUnhandledRequest(object_id, req);
+            return;
+        },
     }
-};
+}
 
 const InterfaceRegistry = struct {
     inner: std.AutoArrayHashMapUnmanaged(u32, Bindings.WaylandInterfaceType),

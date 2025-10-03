@@ -30,21 +30,14 @@ pub fn init(alloc: std.mem.Allocator) !rendering.RenderBackend {
         .ctx = ret,
         .event_fd = fd,
         .vtable = &.{
-            .wantsRender = wantsRender,
             .displayBuffer = displayBuffer,
             .service = service,
         },
     };
 }
 
-fn wantsRender(ctx: ?*anyopaque) bool {
-    const self: *NullRenderBackend = @ptrCast(@alignCast(ctx));
-    return self.timer_expired;
-}
-
-fn displayBuffer(ctx: ?*anyopaque, _: rendering.RenderBuffer) !void {
-    const self: *NullRenderBackend = @ptrCast(@alignCast(ctx));
-    self.timer_expired = false;
+fn displayBuffer(_: ?*anyopaque, _: rendering.RenderBuffer, locked: *bool) !void {
+    locked.* = false;
 }
 
 fn service(ctx: ?*anyopaque, fd: std.posix.fd_t) !void {

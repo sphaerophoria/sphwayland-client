@@ -20,17 +20,12 @@ pub const RenderBackend = struct {
     vtable: *const VTable,
 
     const VTable = struct {
-        wantsRender: *const fn (ctx: ?*anyopaque) bool,
-        displayBuffer: *const fn (ctx: ?*anyopaque, render_buffer: RenderBuffer) anyerror!void,
+        displayBuffer: *const fn (ctx: ?*anyopaque, render_buffer: RenderBuffer, locked_flag: *bool) anyerror!void,
         service: *const fn (ctx: ?*anyopaque, fd: std.posix.fd_t) anyerror!void,
     };
 
-    pub fn wantsRender(self: RenderBackend) bool {
-        return self.vtable.wantsRender(self.ctx);
-    }
-
-    pub fn displayBuffer(self: RenderBackend, render_buffer: RenderBuffer) !void {
-        try self.vtable.displayBuffer(self.ctx, render_buffer);
+    pub fn displayBuffer(self: RenderBackend, render_buffer: RenderBuffer, locked_flag: *bool) !void {
+        try self.vtable.displayBuffer(self.ctx, render_buffer, locked_flag);
     }
 
     pub fn service(self: RenderBackend) !void {

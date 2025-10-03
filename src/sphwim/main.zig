@@ -45,7 +45,6 @@ fn createWaylandSocket(alloc: sphtud.alloc.LinearAllocator) !std.net.Server {
 
 const WlServerContext = struct {
     server_alloc: *sphtud.alloc.Sphalloc,
-    connections: *sphtud.util.RuntimeSegmentedListSphalloc(wayland.Connection.State),
     compositor_state: *CompositorState,
     render_backend: rendering.RenderBackend,
 
@@ -54,8 +53,7 @@ const WlServerContext = struct {
         errdefer connection_alloc.deinit();
 
         const ret = try connection_alloc.arena().create(wayland.Connection);
-        const renderable_id = self.compositor_state.renderables.metadata.len;
-        ret.* = try wayland.Connection.init(connection_alloc, connection, self.compositor_state, self.render_backend, self.connections, renderable_id);
+        ret.* = try wayland.Connection.init(connection_alloc, connection, self.compositor_state, self.render_backend);
 
         return ret.handler();
     }
@@ -89,18 +87,15 @@ const VsyncHandler = struct {
             return .complete;
         };
 
-        if (!self.render_backend.wantsRender()) {
-            return .in_progress;
-        }
-
         const now = std.time.Instant.now() catch return .complete;
         defer self.last = now;
 
+        // FIXME: This is probably over triggering
         self.compositor_state.updateBuffers() catch return .complete;
         var buffers = self.compositor_state.renderables.locked_buffers.iter();
         while (buffers.next()) |buffer| {
-            std.log.debug("Rendering buffer with fd {d}", .{buffer.buf_fd});
-            self.render_backend.displayBuffer(buffer.*) catch return .complete;
+            if (buffer.locked) continue;
+            self.render_backend.displayBuffer(buffer.buffer, &buffer.locked) catch return .complete;
         }
 
         std.debug.print("flipppy floppy {d}\n", .{now.since(self.last) / std.time.ns_per_ms});
@@ -125,13 +120,6 @@ pub fn main() !void {
         try root_alloc.arena().alloc(u8, 1 * 1024 * 1024),
     );
 
-    var connections = try sphtud.util.RuntimeSegmentedListSphalloc(wayland.Connection.State).init(
-        root_alloc.arena(),
-        root_alloc.block_alloc.allocator(),
-        10,
-        10 * 1024,
-    );
-
     const render_backend = try rendering.initRenderBackend(root_alloc.arena());
 
     var compositor_state = try CompositorState.init(&root_alloc, render_backend);
@@ -146,7 +134,6 @@ pub fn main() !void {
     try loop.register(vsync_handler.handler());
     var server_context = WlServerContext{
         .server_alloc = try root_alloc.makeSubAlloc("server"),
-        .connections = &connections,
         .render_backend = render_backend,
         .compositor_state = &compositor_state,
     };

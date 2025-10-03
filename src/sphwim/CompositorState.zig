@@ -27,24 +27,28 @@ pub fn pushRenderable(self: *CompositorState, connection: *wayland.Connection, s
         .next_buffer = buffer,
     });
 
-    try self.renderables.locked_buffers.append(buffer);
+    try self.renderables.locked_buffers.append(.{
+        .locked = false,
+        .buffer = buffer,
+    });
+    const locked_buffer = self.renderables.locked_buffers.getPtr(renderable_id);
 
     std.debug.assert(self.renderables.locked_buffers.len == self.renderables.metadata.len);
 
     try connection.requestFrame(surface);
     try connection.io_writer.flush();
 
-    // Workaround for having no DRI wakeups cause we aren't rendering a background
-    if (renderable_id == 0) {
-        try self.render_backend.displayBuffer(buffer);
-    }
+    try self.render_backend.displayBuffer(buffer, &locked_buffer.locked);
 
     return .{ .inner = renderable_id };
 }
 
 pub fn removeRenderable(self: *CompositorState, handle: Renderables.Handle) void {
     self.renderables.metadata.swapRemove(handle.inner);
+
     // FIXME: Surely we should be closing the file handle
+    // FIXME: The locked flag might still be in use by the DRM subsystem, so we
+    // should probably queue for removal when the buffer unlocks
     self.renderables.locked_buffers.swapRemove(handle.inner);
 
     if (handle.inner < self.renderables.metadata.len) {
@@ -67,17 +71,20 @@ pub fn updateBuffers(self: *CompositorState) !void {
 
         const next_buffer = metadata.next_buffer;
 
-        if (next_buffer.buf_fd == locked_buffer.buf_fd) {
+        if (locked_buffer.locked) continue;
+
+        if (next_buffer.buf_fd == locked_buffer.buffer.buf_fd) {
             continue;
         }
 
-        try metadata.connection.releaseBuffer(locked_buffer.wl_buffer);
-        locked_buffer.* = next_buffer;
+        try metadata.connection.releaseBuffer(locked_buffer.buffer.wl_buffer);
+        locked_buffer.buffer = next_buffer;
 
         try metadata.connection.requestFrame(metadata.surface);
         try metadata.connection.io_writer.flush();
     }
 }
+
 pub const RenderableMetadata = struct {
     connection: *wayland.Connection,
     surface: wayland.Connection.WlSurfaceId,
@@ -87,8 +94,12 @@ pub const RenderableMetadata = struct {
 // Ties wayland surfaces that are ready to their renderable state
 pub const Renderables = struct {
     metadata: sphtud.util.RuntimeSegmentedListSphalloc(RenderableMetadata),
-    locked_buffers: sphtud.util.RuntimeSegmentedListSphalloc(rendering.RenderBuffer),
+    locked_buffers: sphtud.util.RuntimeSegmentedListSphalloc(LockedBuffer),
 
+    const LockedBuffer = struct {
+        locked: bool,
+        buffer: rendering.RenderBuffer,
+    };
     pub fn init(alloc: *sphtud.alloc.Sphalloc) !Renderables {
         return .{
             .metadata = try .init(

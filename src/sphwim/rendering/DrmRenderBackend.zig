@@ -8,15 +8,13 @@ const rendering = @import("../rendering.zig");
 const Drm = @This();
 
 crtc_id: u32,
-last_fb_id: ?u32,
 dri_file: std.fs.File,
 connector_id: u32,
 preferred_mode: *c.drmModeModeInfo,
-page_flip_complete: bool = false,
 
 // FIXME: Deinit or file pool
 pub fn init(alloc: std.mem.Allocator) !rendering.RenderBackend {
-    const f = try std.fs.openFileAbsolute("/dev/dri/card1", .{
+    const f = try std.fs.openFileAbsolute("/dev/dri/card0", .{
         .mode = .read_write,
     });
 
@@ -31,7 +29,6 @@ pub fn init(alloc: std.mem.Allocator) !rendering.RenderBackend {
 
     const ret = try alloc.create(Drm);
     ret.* = .{
-        .last_fb_id = null,
         .crtc_id = crtc.crtc_id,
         .dri_file = f,
         .connector_id = connector.connector_id,
@@ -42,22 +39,15 @@ pub fn init(alloc: std.mem.Allocator) !rendering.RenderBackend {
         .ctx = ret,
         .event_fd = f.handle,
         .vtable = &.{
-            .wantsRender = wantsRender,
             .displayBuffer = displayBuffer,
             .service = service,
         },
     };
 }
 
-fn wantsRender(ctx: ?*anyopaque) bool {
-    const self: *Drm = @ptrCast(@alignCast(ctx));
-    return self.page_flip_complete;
-}
-
 fn service(ctx: ?*anyopaque, fd: std.posix.fd_t) !void {
     _ = fd;
     const self: *Drm = @ptrCast(@alignCast(ctx));
-    if (self.last_fb_id == null) return;
     var evctx = c.drmEventContext{
         .version = 2,
         .page_flip_handler = pageFlipHandler,
@@ -65,7 +55,7 @@ fn service(ctx: ?*anyopaque, fd: std.posix.fd_t) !void {
     _ = c.drmHandleEvent(self.dri_file.handle, &evctx);
 }
 
-fn displayBuffer(ctx: ?*anyopaque, buffer: rendering.RenderBuffer) !void {
+fn displayBuffer(ctx: ?*anyopaque, buffer: rendering.RenderBuffer, locked_flag: *bool) !void {
     const self: *Drm = @ptrCast(@alignCast(ctx));
     var dri_prime_handle = c.drm_prime_handle{
         .flags = 0,
@@ -112,17 +102,9 @@ fn displayBuffer(ctx: ?*anyopaque, buffer: rendering.RenderBuffer) !void {
         }
     }
 
+    locked_flag.* = true;
     // FIXME: Err check
-    //if (self.last_fb_id) |_| {
-    self.page_flip_complete = false;
-    std.debug.print("Flipping our shit\n", .{});
-    _ = c.drmModePageFlip(self.dri_file.handle, self.crtc_id, fb_id, c.DRM_MODE_PAGE_FLIP_EVENT, &self.page_flip_complete);
-    //} else {
-    //    _ = c.drmModeSetCrtc(self.dri_file.handle, self.crtc_id, 0, 0, 0, null, 0, null);
-    //    _ = c.drmModeSetCrtc(self.dri_file.handle, self.crtc_id, fb_id, 0, 0, &self.connector_id, 1, self.preferred_mode);
-    //}
-
-    self.last_fb_id = fb_id;
+    _ = c.drmModePageFlip(self.dri_file.handle, self.crtc_id, fb_id, c.DRM_MODE_PAGE_FLIP_EVENT, locked_flag);
 }
 
 fn pageFlipHandler(fd: c_int, frame: c_uint, sec: c_uint, usec: c_uint, data: ?*anyopaque) callconv(.c) void {
