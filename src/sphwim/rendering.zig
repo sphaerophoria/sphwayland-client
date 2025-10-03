@@ -3,6 +3,7 @@ const DrmRenderBackend = @import("rendering/DrmRenderBackend.zig");
 const NullRenderBackend = @import("rendering/NullRenderBackend.zig");
 
 pub const RenderBuffer = struct {
+    wl_buffer: u32,
     buf_fd: c_int,
     modifiers: u64,
     offset: u32,

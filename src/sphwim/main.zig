@@ -3,6 +3,7 @@ const sphtud = @import("sphtud");
 const rendering = @import("rendering.zig");
 const wayland = @import("wayland.zig");
 const Bindings = @import("wayland_bindings");
+const CompositorState = @import("CompositorState.zig");
 
 pub const std_option = std.Options {
     .log_level = .warn,
@@ -43,12 +44,10 @@ fn createWaylandSocket(alloc: sphtud.alloc.LinearAllocator) !std.net.Server {
     }
 }
 
-
-
-
 const WlServerContext = struct {
     server_alloc: *sphtud.alloc.Sphalloc,
     connections: *sphtud.util.RuntimeSegmentedListSphalloc(wayland.Connection.State),
+    compositor_state: *CompositorState,
     render_backend: rendering.RenderBackend,
 
     pub fn generate(self: *WlServerContext, connection: std.net.Server.Connection) !sphtud.event.Handler {
@@ -56,7 +55,8 @@ const WlServerContext = struct {
         errdefer connection_alloc.deinit();
 
         const ret = try connection_alloc.arena().create(wayland.Connection);
-        ret.* = try wayland.Connection.init(connection_alloc, connection, self.render_backend, self.connections);
+        const renderable_id = self.compositor_state.renderables.metadata.len;
+        ret.* = try wayland.Connection.init(connection_alloc, connection, self.compositor_state, self.render_backend, self.connections, renderable_id);
 
         return ret.handler();
     }
@@ -68,7 +68,7 @@ const WlServerContext = struct {
 
 const VsyncHandler = struct {
     render_backend: rendering.RenderBackend,
-    connection_states: *sphtud.util.RuntimeSegmentedListSphalloc(wayland.Connection.State),
+    compositor_state: *CompositorState,
     last: std.time.Instant,
 
     const vtable = sphtud.event.Handler.VTable {
@@ -97,27 +97,11 @@ const VsyncHandler = struct {
         const now = std.time.Instant.now() catch return .complete;
         defer self.last = now;
 
-        var it = self.connection_states.iter();
-        while (it.next()) |state| {
-            if (state.frame_callback) |id| {
-                var callback = Bindings.WlCallback { .id = id };
-                callback.done(state.io_writer, .{
-                    .callback_data = 0,
-                }) catch unreachable;
-
-                // FIXME: Do we have to ensure only the buffers currently queued get relaesed
-                const buffer_keys = state.wl_buffers.mapping.keys();
-                for (buffer_keys) |buffer_id| {
-                    var buffer = Bindings.WlBuffer { .id = buffer_id };
-                    buffer.release(state.io_writer, .{}) catch unreachable;
-                }
-                // FIXME: Cleanup any corresponding buffers
-                state.wl_buffers.storage.clearRetainingCapacity();
-                state.wl_buffers.mapping.clearRetainingCapacity();
-
-                state.io_writer.flush() catch unreachable;
-
-            }
+        self.compositor_state.renderables.updateBuffers() catch return .complete;
+        var buffers = self.compositor_state.renderables.locked_buffers.iter();
+        while (buffers.next()) |buffer| {
+            std.log.debug("Rendering buffer with fd {d}", .{buffer.buf_fd});
+            self.render_backend.displayBuffer(buffer.*) catch return .complete;
         }
 
         std.debug.print("flipppy floppy {d}\n", .{now.since(self.last) / std.time.ns_per_ms});
@@ -151,10 +135,12 @@ pub fn main() !void {
 
     const render_backend = try rendering.initRenderBackend(root_alloc.arena());
 
+    var compositor_state = try CompositorState.init(&root_alloc);
+
     var vsync_handler = VsyncHandler {
         .render_backend = render_backend,
         .last = try std.time.Instant.now(),
-        .connection_states = &connections,
+        .compositor_state = &compositor_state,
     };
 
     var loop = try sphtud.event.Loop.init(&root_alloc);
@@ -163,6 +149,7 @@ pub fn main() !void {
         .server_alloc = try root_alloc.makeSubAlloc("server"),
         .connections = &connections,
         .render_backend = render_backend,
+        .compositor_state = &compositor_state,
     };
 
     const socket = try createWaylandSocket(scratch.linear());

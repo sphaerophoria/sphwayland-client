@@ -4,6 +4,7 @@ const Reader = @import("Reader.zig");
 const rendering = @import("../rendering.zig");
 const Bindings = @import("wayland_bindings");
 const wlio = @import("wlio");
+const CompositorState = @import("../CompositorState.zig");
 
 const Connection = @This();
 
@@ -20,7 +21,7 @@ const vtable = sphtud.event.Handler.VTable {
     .close = close,
 };
 
-pub fn init(alloc: *sphtud.alloc.Sphalloc, connection: std.net.Server.Connection, render_backend: rendering.RenderBackend, connections: *sphtud.util.RuntimeSegmentedListSphalloc(State)) !Connection {
+pub fn init(alloc: *sphtud.alloc.Sphalloc, connection: std.net.Server.Connection, compositor_state: *CompositorState,  render_backend: rendering.RenderBackend, connections: *sphtud.util.RuntimeSegmentedListSphalloc(State), renderable_id: usize) !Connection {
     const stream_writer = try alloc.arena().create(std.net.Stream.Writer);
     stream_writer.* = connection.stream.writer(try alloc.arena().alloc(u8, 4096));
     const io_writer = &stream_writer.interface;
@@ -31,7 +32,8 @@ pub fn init(alloc: *sphtud.alloc.Sphalloc, connection: std.net.Server.Connection
 
     try connections.append(undefined);
     const state = connections.getPtr(connections.len - 1);
-    try state.initPinned(alloc, render_backend, io_writer);
+
+    try state.initPinned(alloc, render_backend, compositor_state, renderable_id, io_writer);
 
     return .{
         .alloc = alloc,
@@ -50,6 +52,24 @@ pub fn handler(self: *Connection) sphtud.event.Handler {
         .vtable = &vtable,
         .fd = self.connection.stream.handle,
     };
+}
+
+pub fn releaseBuffer(self: *Connection, wl_buffer_id: u32) !void {
+    const wl_buffer = Bindings.WlBuffer { .id = wl_buffer_id };
+    try wl_buffer.release(self.io_writer, .{});
+}
+
+pub fn requestFrame(self: *Connection, surface_id: u32) !void {
+    const surface = self.state.wl_surfaces.get(surface_id) orelse return error.InvalidSurface;
+    const callback_id = surface.callback_id orelse return;
+    const wl_callback = Bindings.WlCallback { .id = callback_id };
+    try wl_callback.done(self.io_writer, .{
+        .callback_data = 0,
+    });
+}
+
+pub fn updateRenderableHandle(self: *Connection, surface: u32, handle: CompositorState.Renderables.Handle) void {
+    self.state.wl_surfaces.getPtr(surface).?.handle = handle;
 }
 
 fn poll(ctx: ?*anyopaque, _: *sphtud.event.Loop) sphtud.event.PollResult {
@@ -95,12 +115,18 @@ fn pollError(self: *Connection) !void {
             fd = self.stream_reader.fd_list.pop() orelse unreachable;
         }
 
-        try self.state.handleMessage(header.id, req, fd);
+        try self.state.handleMessage(self, header.id, req, fd);
     }
 }
 
 fn close(ctx: ?*anyopaque) void {
     const self: *Connection = @ptrCast(@alignCast(ctx));
+    for (self.state.wl_surfaces.storage.items) |surface| {
+        if (surface.handle) |h| {
+            self.state.compositor_state.renderables.removeRenderable(h);
+        }
+
+    }
     self.connection.stream.close();
     // FIXME: Remove connection state from list
     self.alloc.deinit();
@@ -109,6 +135,8 @@ fn close(ctx: ?*anyopaque) void {
 pub const State = struct {
     alloc: *sphtud.alloc.Sphalloc,
     io_writer: *std.Io.Writer,
+    compositor_state: *CompositorState,
+    renderable_id: usize,
 
     interface_registry: InterfaceRegistry,
     wl_surfaces: IndirectLookupOwned(Surface),
@@ -118,14 +146,15 @@ pub const State = struct {
     // Self reference xdg_surfaces -> wl_surfaces
     xdg_surfaces: IndirectLookupRef(Surface),
     windows: IndirectLookupOwned(Window),
-    frame_callback: ?u32 = null,
 
     render_backend: rendering.RenderBackend,
 
-    fn initPinned(self: *State, alloc: *sphtud.alloc.Sphalloc, render_backend: rendering.RenderBackend, io_writer: *std.Io.Writer) !void {
+    fn initPinned(self: *State, alloc: *sphtud.alloc.Sphalloc, render_backend: rendering.RenderBackend, compositor_state: *CompositorState, renderable_id: usize, io_writer: *std.Io.Writer) !void {
         self.* = .{
             .alloc = alloc,
             .io_writer = io_writer,
+            .compositor_state = compositor_state,
+            .renderable_id = renderable_id,
             .interface_registry = try .init(alloc.general()),
             .wl_surfaces = .init(),
             .xdg_surfaces = undefined,
@@ -141,7 +170,7 @@ pub const State = struct {
         };
     }
 
-    fn handleMessage(state: *State, object_id: u32, req: Bindings.WaylandIncomingMessage, fd: ?std.posix.fd_t) !void {
+    fn handleMessage(state: *State, self: *Connection, object_id: u32, req: Bindings.WaylandIncomingMessage, fd: ?std.posix.fd_t) !void {
         const supported_interfaces: []const Bindings.WaylandInterfaceType= &.{
             .wl_compositor,
             .xdg_wm_base,
@@ -244,32 +273,39 @@ pub const State = struct {
             },
             .wl_surface => |parsed| switch (parsed) {
                 .commit => {
-                    const surface = state.wl_surfaces.get(object_id) orelse return error.InvalidSurface;
+                    const surface = state.wl_surfaces.getPtr(object_id) orelse return error.InvalidSurface;
 
+                    if (surface.buffer) |buf_id| {
+                        const buffer = state.wl_buffers.get(buf_id) orelse unreachable;
 
-                    if (surface.buffer) |buf_handle| {
-                        const buffer = state.wl_buffers.storage.items[buf_handle];
+                        const render_buffer = rendering.RenderBuffer {
+                            .wl_buffer = buf_id,
+                            .buf_fd = buffer.buf_params.fd,
+                            .modifiers = buffer.buf_params.modifier,
+                            .offset = buffer.buf_params.offset,
+                            .plane_idx = buffer.buf_params.plane_idx,
+                            .stride = buffer.buf_params.stride,
+                            .width = buffer.width,
+                            .height = buffer.height,
+                            .format = buffer.format,
+                        };
 
-                        try state.render_backend.displayBuffer(
-                            .{
-                                .buf_fd = buffer.buf_params.fd,
-                                .modifiers = buffer.buf_params.modifier,
-                                .offset = buffer.buf_params.offset,
-                                .plane_idx = buffer.buf_params.plane_idx,
-                                .stride = buffer.buf_params.stride,
-                                .width = buffer.width,
-                                .height = buffer.height,
-                                .format = buffer.format,
-                            },
-                        );
+                        if (surface.handle) |h| {
+                            const metadata = state.compositor_state.renderables.getMetadata(h);
+                            metadata.next_buffer = render_buffer;
+                        } else {
+                            surface.handle = try state.compositor_state.renderables.pushRenderable(self, object_id, render_buffer);
+                        }
+
                     }
                 },
                 .frame => |params| {
-                    state.frame_callback = params.callback;
+                    const surface = state.wl_surfaces.getPtr(object_id) orelse return error.InvalidSurface;
+                    surface.callback_id = params.callback;
                 },
                 .attach => |params| {
                     const surface = state.wl_surfaces.getPtr(object_id) orelse return error.InvalidSurface;
-                    surface.buffer = state.wl_buffers.getHandle(params.buffer);
+                    surface.buffer = params.buffer;
                 },
                 else => {
                     logUnhandledRequest(object_id, req);
@@ -471,7 +507,9 @@ const BufferParams = struct {
 const Surface = struct {
     xdg_surface_id: ?u32 = null,
     // FIXME: Strong type storage vs wayland handles
-    buffer: ?usize = null,
+    buffer: ?u32 = null,
+    handle: ?CompositorState.Renderables.Handle = null,
+    callback_id: ?u32 = null,
 };
 
 const Window = struct {
