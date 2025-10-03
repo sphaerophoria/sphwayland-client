@@ -14,6 +14,7 @@ connection: std.net.Server.Connection,
 stream_reader: *Reader,
 io_reader: *std.Io.Reader,
 io_writer: *std.Io.Writer,
+// FIXME: WTF is the difference between state and us? Remove this...
 state: *State,
 
 const vtable = sphtud.event.Handler.VTable {
@@ -59,7 +60,7 @@ pub fn releaseBuffer(self: *Connection, wl_buffer_id: u32) !void {
     try wl_buffer.release(self.io_writer, .{});
 }
 
-pub fn requestFrame(self: *Connection, surface_id: u32) !void {
+pub fn requestFrame(self: *Connection, surface_id: WlSurfaceId) !void {
     const surface = self.state.wl_surfaces.get(surface_id) orelse return error.InvalidSurface;
     const callback_id = surface.callback_id orelse return;
     const wl_callback = Bindings.WlCallback { .id = callback_id };
@@ -68,7 +69,7 @@ pub fn requestFrame(self: *Connection, surface_id: u32) !void {
     });
 }
 
-pub fn updateRenderableHandle(self: *Connection, surface: u32, handle: CompositorState.Renderables.Handle) void {
+pub fn updateRenderableHandle(self: *Connection, surface: WlSurfaceId, handle: CompositorState.Renderables.Handle) void {
     self.state.wl_surfaces.getPtr(surface).?.handle = handle;
 }
 
@@ -121,16 +122,24 @@ fn pollError(self: *Connection) !void {
 
 fn close(ctx: ?*anyopaque) void {
     const self: *Connection = @ptrCast(@alignCast(ctx));
-    for (self.state.wl_surfaces.storage.items) |surface| {
-        if (surface.handle) |h| {
+    var surface_it = self.state.wl_surfaces.iter();
+    while (surface_it.next()) |surface| {
+        if (surface.val.handle) |h| {
             self.state.compositor_state.renderables.removeRenderable(h);
         }
-
     }
+
+    // FIXME: All file descriptors should be attached to a pool and closed
+
     self.connection.stream.close();
     // FIXME: Remove connection state from list
     self.alloc.deinit();
 }
+
+pub const XdgSurfaceId = struct { inner: u32 };
+pub const WlSurfaceId = struct { inner: u32 };
+pub const WlBufferId = struct { inner: u32 };
+
 
 pub const State = struct {
     alloc: *sphtud.alloc.Sphalloc,
@@ -139,15 +148,21 @@ pub const State = struct {
     renderable_id: usize,
 
     interface_registry: InterfaceRegistry,
-    wl_surfaces: IndirectLookupOwned(Surface),
-    wl_buffers: IndirectLookupOwned(Buffer),
+    wl_surfaces: sphtud.util.AutoHashMapSphalloc(WlSurfaceId, Surface),
+    wl_buffers: sphtud.util.AutoHashMapSphalloc(WlBufferId, Buffer),
 
     zwp_params: IndirectLookupOwned(?BufferParams),
-    // Self reference xdg_surfaces -> wl_surfaces
-    xdg_surfaces: IndirectLookupRef(Surface),
+
+    xdg_surfaces: sphtud.util.AutoHashMapSphalloc(XdgSurfaceId, WlSurfaceId),
     windows: IndirectLookupOwned(Window),
 
     render_backend: rendering.RenderBackend,
+
+    const typical_surfaces = 8;
+    const max_surfaces = 100;
+
+    const typical_buffers = typical_surfaces * 2;
+    const max_buffers = max_surfaces * 2;
 
     fn initPinned(self: *State, alloc: *sphtud.alloc.Sphalloc, render_backend: rendering.RenderBackend, compositor_state: *CompositorState, renderable_id: usize, io_writer: *std.Io.Writer) !void {
         self.* = .{
@@ -156,18 +171,15 @@ pub const State = struct {
             .compositor_state = compositor_state,
             .renderable_id = renderable_id,
             .interface_registry = try .init(alloc.general()),
-            .wl_surfaces = .init(),
+            .wl_surfaces = try .init(alloc.arena(), alloc.block_alloc.allocator(), typical_surfaces, max_surfaces),
             .xdg_surfaces = undefined,
             .windows = .init(),
-            .wl_buffers = .init(),
+            .wl_buffers = try .init(alloc.arena(), alloc.block_alloc.allocator(), typical_surfaces, max_surfaces),
             .zwp_params = .init(),
             .render_backend = render_backend,
         };
 
-        self.xdg_surfaces = .{
-            .storage = &self.wl_surfaces.storage,
-            .mapping = .{},
-        };
+        self.xdg_surfaces = try .init(alloc.arena(), alloc.block_alloc.allocator(), typical_surfaces, max_surfaces);
     }
 
     fn handleMessage(state: *State, self: *Connection, object_id: u32, req: Bindings.WaylandIncomingMessage, fd: ?std.posix.fd_t) !void {
@@ -194,9 +206,12 @@ pub const State = struct {
 
                     try state.io_writer.flush();
                 },
-                else => {
-                    logUnhandledRequest(object_id, req);
-                    return;
+                .sync => |params| {
+                    const callback = Bindings.WlCallback { .id = params.callback };
+                    try callback.done(state.io_writer, .{
+                        .callback_data = 0,
+                    });
+                    try state.io_writer.flush();
                 },
             },
             .wl_registry => |parsed| switch (parsed) {
@@ -208,7 +223,8 @@ pub const State = struct {
             },
             .wl_compositor => |parsed| switch (parsed) {
                 .create_surface => |params| {
-                    try state.wl_surfaces.insert(state.alloc.general(), params.id, .{});
+                    const wl_surface_id = WlSurfaceId { .inner = params.id };
+                    try state.wl_surfaces.put(wl_surface_id, .{});
                     try state.interface_registry.put(state.alloc.general(), params.id,  .wl_surface);
                 },
                 else => {
@@ -218,18 +234,14 @@ pub const State = struct {
             },
             .xdg_wm_base => |parsed| switch (parsed) {
                 .get_xdg_surface => |params| {
-                    const handle = state.wl_surfaces.getHandle(params.surface) orelse return error.InvalidSurface;
+                    const wl_surface_id = WlSurfaceId { .inner = params.surface };
 
-                    // FIXME: Better API?
-                    const surface = &state.wl_surfaces.storage.items[handle];
-                    surface.xdg_surface_id = params.id;
-
-                    try state.xdg_surfaces.insert(state.alloc.general(), params.id, handle);
+                    const xdg_id = XdgSurfaceId { .inner = params.id };
+                    try state.xdg_surfaces.put(xdg_id, wl_surface_id);
 
                     try state.interface_registry.put(state.alloc.general(), params.id, .xdg_surface);
 
-                    const xdg_id = surface.xdg_surface_id orelse return error.InvalidSurface;
-                    var xdg_surf = Bindings.XdgSurface { .id = xdg_id };
+                    var xdg_surf = Bindings.XdgSurface { .id = xdg_id.inner };
                     try xdg_surf.configure(state.io_writer, .{
                         // FIXME: Random number that is confirmed in ack
                         .serial = 1234,
@@ -243,11 +255,8 @@ pub const State = struct {
             },
             .xdg_surface => |parsed| switch (parsed) {
                 .get_toplevel => |params| {
-                    const surface_id = state.xdg_surfaces.getHandle(object_id) orelse return error.InvalidSurface;
-
                     try state.windows.insert(state.alloc.general(), params.id, .{
                         .alloc = try state.alloc.makeSubAlloc("window"),
-                        .surface = surface_id,
                     });
                     try state.interface_registry.put(state.alloc.general(), params.id,  .xdg_toplevel);
                 },
@@ -273,13 +282,14 @@ pub const State = struct {
             },
             .wl_surface => |parsed| switch (parsed) {
                 .commit => {
-                    const surface = state.wl_surfaces.getPtr(object_id) orelse return error.InvalidSurface;
+                    const wl_surface_id = WlSurfaceId { .inner = object_id };
+                    const surface = state.wl_surfaces.getPtr(wl_surface_id) orelse return error.InvalidSurface;
 
                     if (surface.buffer) |buf_id| {
                         const buffer = state.wl_buffers.get(buf_id) orelse unreachable;
 
                         const render_buffer = rendering.RenderBuffer {
-                            .wl_buffer = buf_id,
+                            .wl_buffer = buf_id.inner,
                             .buf_fd = buffer.buf_params.fd,
                             .modifiers = buffer.buf_params.modifier,
                             .offset = buffer.buf_params.offset,
@@ -294,18 +304,20 @@ pub const State = struct {
                             const metadata = state.compositor_state.renderables.getMetadata(h);
                             metadata.next_buffer = render_buffer;
                         } else {
-                            surface.handle = try state.compositor_state.renderables.pushRenderable(self, object_id, render_buffer);
+                            surface.handle = try state.compositor_state.renderables.pushRenderable(self, wl_surface_id, render_buffer);
                         }
 
                     }
                 },
                 .frame => |params| {
-                    const surface = state.wl_surfaces.getPtr(object_id) orelse return error.InvalidSurface;
+                    const wl_surface_id = WlSurfaceId { .inner = object_id };
+                    const surface = state.wl_surfaces.getPtr(wl_surface_id) orelse return error.InvalidSurface;
                     surface.callback_id = params.callback;
                 },
                 .attach => |params| {
-                    const surface = state.wl_surfaces.getPtr(object_id) orelse return error.InvalidSurface;
-                    surface.buffer = params.buffer;
+                    const wl_surface_id = WlSurfaceId { .inner = object_id };
+                    const surface = state.wl_surfaces.getPtr(wl_surface_id) orelse return error.InvalidSurface;
+                    surface.buffer = WlBufferId { .inner = params.buffer };
                 },
                 else => {
                     logUnhandledRequest(object_id, req);
@@ -331,7 +343,8 @@ pub const State = struct {
                     const buf_params_opt = state.zwp_params.get(object_id) orelse return error.InvalidObject;
                     const buf_params = buf_params_opt orelse return error.EmptyZwpParams;
 
-                    try state.wl_buffers.insert(state.alloc.general(), params.buffer_id, .{
+                    const wl_buffer_id = WlBufferId { .inner = params.buffer_id };
+                    try state.wl_buffers.put(wl_buffer_id, .{
                         .buf_params = buf_params,
                         .width = params.width,
                         .height = params.height,
@@ -356,7 +369,7 @@ pub const State = struct {
             },
             .zxdg_decoration_manager_v1 => |parsed| switch (parsed) {
                 .get_toplevel_decoration => |_| {
-                    // Whatever
+                    logUnhandledRequest(object_id, req);
                 },
                 else => {
                     logUnhandledRequest(object_id, req);
@@ -451,6 +464,7 @@ fn IndirectLookupRef(comptime T: type) type {
 
 fn IndirectLookupOwned(comptime T: type) type {
     return struct {
+        // FIXME: I don't think this double map thing is really helping us at all
         storage: std.ArrayList(T),
         mapping: std.AutoArrayHashMapUnmanaged(u32, usize),
 
@@ -505,19 +519,15 @@ const BufferParams = struct {
 
 
 const Surface = struct {
-    xdg_surface_id: ?u32 = null,
-    // FIXME: Strong type storage vs wayland handles
-    buffer: ?u32 = null,
+    buffer: ?WlBufferId = null,
     handle: ?CompositorState.Renderables.Handle = null,
     callback_id: ?u32 = null,
 };
 
 const Window = struct {
-    // FIXME: Should have own allocator
     alloc: *sphtud.alloc.Sphalloc, // owned
     title: []const u8 = &.{}, // alloc.general()
     app_id: []const u8 = &.{}, // alloc.general()
-    surface: usize,
 
     fn deinit(self: *Window) void {
         self.alloc.deinit();
