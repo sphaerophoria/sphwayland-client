@@ -103,6 +103,73 @@ const VsyncHandler = struct {
     }
 };
 
+const PeriodicMemoryDumper = struct {
+    root: *sphtud.alloc.Sphalloc,
+    scratch: *sphtud.alloc.BufAllocator,
+    timer: std.posix.fd_t,
+
+    fn init(root: *sphtud.alloc.Sphalloc, scratch: *sphtud.alloc.BufAllocator) !PeriodicMemoryDumper {
+        const fd = try std.posix.timerfd_create(.MONOTONIC, .{ .NONBLOCK = true });
+
+        const timer = std.posix.system.itimerspec {
+            .it_value = .{
+                .sec = 0.0,
+                .nsec = 1.0,
+            },
+            .it_interval = .{
+                .sec = 5.0,
+                .nsec = 0.0,
+            },
+        };
+        try std.posix.timerfd_settime(fd, .{ .ABSTIME = false }, &timer, null);
+
+        return .{
+            .root = root,
+            .scratch = scratch,
+            .timer = fd,
+        };
+
+    }
+
+    const vtable = sphtud.event.Handler.VTable{
+        .poll = poll,
+        .close = close,
+    };
+
+    fn handler(self: *PeriodicMemoryDumper) sphtud.event.Handler {
+        return .{
+            .ptr = self,
+            .fd = self.timer,
+            .vtable = &vtable,
+        };
+    }
+
+    fn poll(ctx: ?*anyopaque, _: *sphtud.event.Loop) sphtud.event.PollResult {
+        const self: *PeriodicMemoryDumper = @ptrCast(@alignCast(ctx));
+        self.pollError() catch return .complete;
+        return .in_progress;
+    }
+
+    fn pollError(self: *PeriodicMemoryDumper) !void {
+        const cp = self.scratch.checkpoint();
+        defer self.scratch.restore(cp);
+
+        var num_triggers: u64 = 0;
+        _ = try std.posix.read(self.timer, std.mem.asBytes(&num_triggers));
+
+        const snapshot = try sphtud.alloc.MemoryTracker.snapshot(self.scratch.allocator(), self.root, 100);
+        std.log.info("Dumping memory usage", .{});
+        for (snapshot) |elem| {
+            std.log.info("{s}: {d}", .{elem.name, elem.memory_used});
+        }
+    }
+
+    fn close(ctx: ?*anyopaque) void {
+        const self: *PeriodicMemoryDumper = @ptrCast(@alignCast(ctx));
+        std.posix.close(self.timer);
+    }
+};
+
 pub fn main() !void {
     var tpa: sphtud.alloc.TinyPageAllocator = undefined;
     try tpa.initPinned();
@@ -117,6 +184,7 @@ pub fn main() !void {
     const render_backend = try rendering.initRenderBackend(root_alloc.arena());
 
     var compositor_state = try CompositorState.init(&root_alloc, render_backend);
+    var memory_dumper = try PeriodicMemoryDumper.init(&root_alloc, &scratch);
 
     var vsync_handler = VsyncHandler{
         .render_backend = render_backend,
@@ -135,6 +203,7 @@ pub fn main() !void {
     const socket = try createWaylandSocket(scratch.linear());
     var server = try sphtud.event.net.server(socket, &server_context);
     try loop.register(server.handler());
+    try loop.register(memory_dumper.handler());
 
     while (true) {
         scratch.reset();
