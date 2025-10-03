@@ -11,6 +11,7 @@ crtc_id: u32,
 dri_file: std.fs.File,
 connector_id: u32,
 preferred_mode: *c.drmModeModeInfo,
+first_service: bool = true,
 
 // FIXME: Deinit or file pool
 pub fn init(alloc: std.mem.Allocator) !rendering.RenderBackend {
@@ -46,13 +47,19 @@ pub fn init(alloc: std.mem.Allocator) !rendering.RenderBackend {
 }
 
 fn service(ctx: ?*anyopaque, fd: std.posix.fd_t) !void {
-    _ = fd;
     const self: *Drm = @ptrCast(@alignCast(ctx));
+
+    // HACK: For some reason we poll as readable, but then the below hangs. I dunno man
+    if (self.first_service) {
+        self.first_service = false;
+        return;
+    }
+
     var evctx = c.drmEventContext{
         .version = 2,
         .page_flip_handler = pageFlipHandler,
     };
-    _ = c.drmHandleEvent(self.dri_file.handle, &evctx);
+    _ = c.drmHandleEvent(fd, &evctx);
 }
 
 fn displayBuffer(ctx: ?*anyopaque, buffer: rendering.RenderBuffer, locked_flag: *bool) !void {
@@ -114,8 +121,8 @@ fn pageFlipHandler(fd: c_int, frame: c_uint, sec: c_uint, usec: c_uint, data: ?*
     _ = usec;
 
     std.debug.print("Page flip handler time baybeee\n", .{});
-    const page_flip_complete: *bool = @ptrCast(@alignCast(data));
-    page_flip_complete.* = true;
+    const locked: *bool = @ptrCast(@alignCast(data));
+    locked.* = false;
 }
 
 fn getFirstConnectedConnector(f: std.fs.File, resources: *c.drmModeRes) ?*c.drmModeConnector {
