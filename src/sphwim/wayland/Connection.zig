@@ -141,7 +141,6 @@ fn pollError(self: *Connection) !void {
         const req = try parseRequest(header.op, data, self.interface_registry.get(header.id) orelse return error.InvalidInterface);
 
         var fd: ?std.posix.fd_t = null;
-        // FIXME: Impl
         if (requiresFd(req)) {
             // FIXME: Crashing here is insane
             //   1. It might actually just not be here yet
@@ -162,8 +161,6 @@ fn close(ctx: ?*anyopaque) void {
             self.compositor_state.removeRenderable(h);
         }
     }
-
-    // FIXME: All file descriptors should be attached to a pool and closed
 
     self.fd_pool.closeAll();
     self.connection.stream.close();
