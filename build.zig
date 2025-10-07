@@ -193,6 +193,9 @@ const Builder = struct {
         const gl_bindings_translate_c = try self.translateCFixed("src/sphwim/gl_system_bindings.h");
         const gl_bindings = gl_bindings_translate_c.createModule();
 
+        const input_bindings_translate_c = try self.translateCFixed("src/sphwim/input.h");
+        const input_bindings = input_bindings_translate_c.createModule();
+
         const exe = self.b.addExecutable(.{
             .name = "sphwim",
             .root_module = self.b.createModule(.{
@@ -207,9 +210,12 @@ const Builder = struct {
         exe.root_module.addImport("sphtud", sphtud);
         exe.root_module.addImport("fd_cmsg", fd_cmsg);
         exe.root_module.addImport("gl_system_bindings", gl_bindings);
+        exe.root_module.addImport("input", input_bindings);
 
         exe.linkSystemLibrary("gbm");
         exe.linkSystemLibrary("EGL");
+        exe.linkSystemLibrary("input");
+        exe.linkSystemLibrary("libudev");
         exe.linkSystemLibrary("GL");
 
         for (self.b.search_prefixes.items) |prefix| {

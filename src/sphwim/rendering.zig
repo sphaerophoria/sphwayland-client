@@ -8,6 +8,8 @@ const CompositorState = @import("CompositorState.zig");
 const system_gl = @import("system_gl.zig");
 const gl = sphtud.render.gl;
 
+const logger = std.log.scoped(.rendering);
+
 pub const RenderBuffer = struct {
     buf_fd: c_int,
     modifiers: u64,
@@ -57,11 +59,15 @@ pub fn initRenderBackend(alloc: std.mem.Allocator) !RenderBackend {
     if (DrmRenderBackend.init(alloc)) |backend| {
         return backend;
     } else |e| {
-        std.log.info("Failed to init drm render backend: {t}", .{e});
+        logger.info("Failed to init drm render backend: {t}", .{e});
     }
 
-    std.log.warn("Failed to init render backend, using null backend", .{});
+    logger.warn("Failed to init render backend, using null backend", .{});
     return try NullRenderBackend.init();
+}
+
+fn asf32(in: anytype) f32 {
+    return @floatFromInt(in);
 }
 
 pub const Renderer = struct {
@@ -99,7 +105,7 @@ pub const Renderer = struct {
     fn poll(ctx: ?*anyopaque, _: *sphtud.event.Loop, reason: sphtud.event.PollReason) sphtud.event.PollResult {
         const self: *Renderer = @ptrCast(@alignCast(ctx));
         self.pollError(reason) catch |e| {
-            std.log.err("Failed to poll: {t}", .{e});
+            logger.err("Failed to poll: {t}", .{e});
             return .in_progress;
         };
 
@@ -121,7 +127,7 @@ pub const Renderer = struct {
         }
 
         if (!is_readable) {
-            std.log.debug("renderer file not readable, returning early", .{});
+            logger.debug("renderer file not readable, returning early", .{});
             return;
         }
 
@@ -130,6 +136,8 @@ pub const Renderer = struct {
         if (!self.render_in_progress) {
             try self.renderCompositor(now);
         }
+
+        logger.debug("rendered after {d}ms", .{now.since(self.last_render_time) / std.time.ns_per_ms});
     }
 
     fn close(ctx: ?*anyopaque) void {
@@ -155,10 +163,9 @@ pub const Renderer = struct {
         defer self.frame_gl_alloc.reset();
 
         var renderable_it = renderables.buffers.iter();
-
         while (renderable_it.next()) |buffer| {
             const texture = importTexture(self.frame_gl_alloc, self.egl_ctx, buffer.*) catch |e| {
-                std.log.warn("failed to import texture {t}, skipping window", .{e});
+                logger.warn("failed to import texture {t}, skipping window", .{e});
                 continue;
             };
 
@@ -170,6 +177,8 @@ pub const Renderer = struct {
             const transform = sphtud.math.Transform.scale(0.5, -0.5);
             self.image_renderer.renderTexture(texture, transform);
         }
+
+        self.renderCursor();
 
         try self.egl_ctx.swapBuffers();
         const front_buf = try self.gbm_ctx.lockFront();
@@ -191,7 +200,30 @@ pub const Renderer = struct {
         self.backend_rendering_buf = front_buf;
 
         try self.compositor_state.requestFrame();
-        std.log.debug("rendered after {d}ms", .{now.since(self.last_render_time) / std.time.ns_per_ms});
+        logger.debug("rendered after {d}ms", .{now.since(self.last_render_time) / std.time.ns_per_ms});
+    }
+
+    fn renderCursor(self: *Renderer) void {
+        // Proof of concept, render the cursor as a black square. A lot of
+        // drivers support hardware blitting of a cursor plane, for now I'm
+        // happy to just ignore that
+
+        logger.debug("cursor pos: {any}", .{self.compositor_state.cursor_pos});
+        const resolution = self.compositor_state.compositor_res;
+        const half_width = asf32(resolution.width) / 2;
+        const half_height = asf32(resolution.height) / 2;
+
+        const transform = sphtud.math.Transform.translate(
+            1.0,
+            -1.0,
+        ).then(.scale(
+            20.0 / half_width,
+            20.0 / half_height,
+        )).then(.translate(
+            -1.0 + self.compositor_state.cursor_pos.x / half_width,
+            1.0 - self.compositor_state.cursor_pos.y / half_height,
+        ));
+        self.image_renderer.renderTexture(.invalid, transform);
     }
 };
 

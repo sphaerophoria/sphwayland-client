@@ -6,9 +6,10 @@ const Bindings = @import("wayland_bindings");
 const CompositorState = @import("CompositorState.zig");
 const system_gl = @import("system_gl.zig");
 const gl = sphtud.render.gl;
+const input = @import("input.zig");
 
 pub const std_options = std.Options{
-    .log_level = .debug,
+    .log_level = .warn,
 };
 
 const PeriodicMemoryDumper = struct {
@@ -111,14 +112,19 @@ pub fn main() !void {
 
     initializeGlParams();
 
-    var compositor_state = try CompositorState.init(&root_alloc, &scratch, render_backend);
-
+    var compositor_state = try CompositorState.init(&root_alloc, &scratch, preferred_size, render_backend);
     var memory_dumper = try PeriodicMemoryDumper.init(&root_alloc, &scratch);
 
     var gl_alloc = try sphtud.render.GlAlloc.init(&root_alloc);
     defer gl_alloc.deinit();
 
     const image_renderer = try sphtud.render.xyuvt_program.ImageRenderer.init(&gl_alloc, .rgba);
+
+    const input_backend = try input.initializeBackend(root_alloc.arena());
+    var input_handler = input.InputHandler{
+        .backend = input_backend,
+        .compositor_state = &compositor_state,
+    };
 
     var renderer = rendering.Renderer{
         .frame_gl_alloc = try gl_alloc.makeSubAlloc(&root_alloc),
@@ -148,6 +154,7 @@ pub fn main() !void {
     );
     try loop.register(server.handler());
     try loop.register(memory_dumper.handler());
+    try loop.register(input_handler.handler());
 
     while (true) {
         scratch.reset();
