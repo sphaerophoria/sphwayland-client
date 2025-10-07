@@ -18,6 +18,8 @@ pkgs.mkShell {
     mesa
     libgbm
     libdrm
+    libinput
+    systemd
   ];
 }
 

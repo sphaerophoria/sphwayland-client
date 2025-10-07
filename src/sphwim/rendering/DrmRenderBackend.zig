@@ -86,7 +86,6 @@ fn displayBuffer(ctx: ?*anyopaque, buffer: rendering.RenderBuffer, locked_flag: 
 
     const fb_id = try self.fbFromRenderBuffer(buffer);
 
-    std.debug.print("Rendering buffer\n", .{});
     // Buffer is on GPU, we are not allowed to delete it :)
     locked_flag.* = true;
 

@@ -5,14 +5,26 @@ const rendering = @import("rendering.zig");
 const FdPool = @import("FdPool.zig");
 
 scratch: *sphtud.alloc.BufAllocator,
+compositor_res: rendering.Resolution,
+cursor_pos: CursorPos,
 renderables: Renderables,
 render_backend: rendering.RenderBackend,
 
+const CursorPos = struct {
+    x: f32,
+    y: f32,
+};
+
 const CompositorState = @This();
 
-pub fn init(alloc: *sphtud.alloc.Sphalloc, scratch: *sphtud.alloc.BufAllocator, render_backend: rendering.RenderBackend) !CompositorState {
+pub fn init(alloc: *sphtud.alloc.Sphalloc, scratch: *sphtud.alloc.BufAllocator, current_res: rendering.Resolution, render_backend: rendering.RenderBackend) !CompositorState {
     return .{
         .scratch = scratch,
+        .compositor_res = current_res,
+        .cursor_pos = .{
+            .x = @floatFromInt(current_res.width / 2),
+            .y = @floatFromInt(current_res.height / 2),
+        },
         .renderables = try .init(alloc),
         .render_backend = render_backend,
     };
@@ -23,6 +35,16 @@ pub fn requestFrame(self: *CompositorState) !void {
     while (it.next()) |si| {
         try si.connection.requestFrame(si.surface);
     }
+}
+
+pub fn notifyCursorMovement(self: *CompositorState, dx: f32, dy: f32) void {
+    self.cursor_pos.x = std.math.clamp(self.cursor_pos.x + dx, 0, asf32(self.compositor_res.width));
+    self.cursor_pos.y = std.math.clamp(self.cursor_pos.y + dy, 0, asf32(self.compositor_res.height));
+}
+
+pub fn notifyCursorPosition(self: *CompositorState, x: f32, y: f32) void {
+    self.cursor_pos.x = std.math.clamp(x, 0, asf32(self.compositor_res.width));
+    self.cursor_pos.y = std.math.clamp(y, 0, asf32(self.compositor_res.height));
 }
 
 pub const SourceInfo = struct {
