@@ -36,12 +36,14 @@ pub const GbmContext = struct {
         pub fn format(self: Buffer) u32 {
             return c.gbm_bo_get_format(self.inner);
         }
-
     };
 
     const format = c.GBM_FORMAT_ARGB8888;
 
-    pub fn init(init_width: u32, init_height: u32,) !GbmContext {
+    pub fn init(
+        init_width: u32,
+        init_height: u32,
+    ) !GbmContext {
         // Would be nice if user could choose
         const device_path = "/dev/dri/card0";
         const f = try std.fs.openFileAbsolute(device_path, .{ .mode = .read_write });
@@ -51,15 +53,7 @@ pub const GbmContext = struct {
         errdefer c.gbm_device_destroy(device);
 
         var modifiers: u64 = 0;
-        const surface = c.gbm_surface_create_with_modifiers2(
-            device,
-            init_width,
-            init_height,
-            format,
-            &modifiers,
-            1,
-            c.GBM_BO_USE_SCANOUT | c.GBM_BO_USE_RENDERING
-        ) orelse return error.GbmSurfaceInit;
+        const surface = c.gbm_surface_create_with_modifiers2(device, init_width, init_height, format, &modifiers, 1, c.GBM_BO_USE_SCANOUT | c.GBM_BO_USE_RENDERING) orelse return error.GbmSurfaceInit;
         errdefer c.gbm_surface_destroy(surface);
 
         return .{
@@ -78,7 +72,6 @@ pub const GbmContext = struct {
 
     pub fn unlock(self: *GbmContext, buf: Buffer) void {
         c.gbm_surface_release_buffer(self.surface, buf.inner);
-
     }
 
     pub fn deinit(self: *GbmContext) void {
@@ -109,11 +102,10 @@ pub const EglContext = struct {
 
         const attribs = [_]c.EGLint{
             c.EGL_RENDERABLE_TYPE, c.EGL_OPENGL_BIT,
-            c.EGL_SURFACE_TYPE, c.EGL_WINDOW_BIT,
+            c.EGL_SURFACE_TYPE,    c.EGL_WINDOW_BIT,
             c.EGL_RENDERABLE_TYPE, c.EGL_OPENGL_BIT,
-            c.EGL_DEPTH_SIZE, 8,
+            c.EGL_DEPTH_SIZE,      8,
             c.EGL_NONE,
-
         };
 
         var num_configs: c_int = 0;
@@ -124,7 +116,6 @@ pub const EglContext = struct {
         const num_configs_u = std.math.cast(usize, num_configs) orelse return error.InvalidNumConfigs;
         const available_configs = try alloc.alloc(c.EGLConfig, num_configs_u);
         defer alloc.free(available_configs);
-
 
         if (c.eglChooseConfig(display, &attribs, available_configs.ptr, num_configs, &num_configs) != c.EGL_TRUE) {
             return error.ChooseConfig;
@@ -169,7 +160,6 @@ pub const EglContext = struct {
     pub fn swapBuffers(self: *const EglContext) !void {
         if (c.eglSwapBuffers(self.display, self.surface) != c.EGL_TRUE) return error.SwapFailed;
     }
-
 
     pub fn getWidth(self: *const EglContext) !c.EGLint {
         var ret: c.EGLint = 0;

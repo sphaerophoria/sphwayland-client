@@ -87,7 +87,7 @@ pub fn sendMessageWithFdAttachment(alloc: Allocator, stream: std.net.Stream, msg
     // This has to be a comptime known value, but the alignment is kinda
     // defined by the C macros. We'll just use 8 and assume that it can't be
     // wrong
-    const cmsg_buf_alignment: std.mem.Alignment  = .@"8";
+    const cmsg_buf_alignment: std.mem.Alignment = .@"8";
     const cmsg_buf = try alloc.allocWithOptions(
         u8,
         cmsg.getCmsgSpace(@sizeOf(std.posix.fd_t)),

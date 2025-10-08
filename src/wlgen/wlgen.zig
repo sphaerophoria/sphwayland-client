@@ -528,10 +528,10 @@ fn anyEventCanBeParsed(interface: Interface) bool {
     return false;
 }
 
-const ZigBindingsWriter = struct  {
+const ZigBindingsWriter = struct {
     writer: *std.Io.Writer,
 
-    fn init(writer: *std.Io.Writer)  ZigBindingsWriter {
+    fn init(writer: *std.Io.Writer) ZigBindingsWriter {
         return .{
             .writer = writer,
         };

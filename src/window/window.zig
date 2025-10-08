@@ -97,7 +97,6 @@ pub const Window = struct {
         var egl_context = try system.EglContext.init(alloc, gbm_context);
         errdefer egl_context.deinit();
 
-
         const wl_surface = try client.newId(wlb.WlSurface);
         try bound_interfaces.compositor.createSurface(writer, .{
             .id = wl_surface.id,
@@ -163,7 +162,6 @@ pub const Window = struct {
         try it.wait();
     }
 
-
     const Size = struct {
         width: i32,
         height: i32,
@@ -200,7 +198,6 @@ pub const Window = struct {
             .modifier_lo = @truncate(modifier),
         });
 
-
         const buf_fd = front_buf.fd();
         try wlclient.sendMessageWithFdAttachment(
             alloc,
@@ -235,7 +232,6 @@ pub const Window = struct {
             .format = front_buf.format(),
             .flags = 0,
         });
-
 
         try self.wl_surface.attach(self.client.writer(), .{
             .buffer = wl_buf.id,
@@ -315,7 +311,6 @@ pub const Window = struct {
                         };
                         self.gbm_ctx.unlock(gbm_handle);
                     },
-
                 }
             },
             else => wlclient.logUnusedEvent(event.event),
@@ -323,4 +318,3 @@ pub const Window = struct {
         return false;
     }
 };
-
