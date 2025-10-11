@@ -12,7 +12,7 @@ const ServerCtx = struct {
     render_backend: rendering.RenderBackend,
     rand: std.Random,
 
-    pub fn generate(self: *ServerCtx, connection: std.net.Server.Connection) !sphtud.event.Handler {
+    pub fn generate(self: *ServerCtx, connection: std.net.Server.Connection) !sphtud.event.LoopSphalloc.Handler {
         const connection_alloc = try self.server_alloc.makeSubAlloc("connection");
         errdefer connection_alloc.deinit();
 
@@ -33,7 +33,7 @@ pub fn makeWaylandServer(
     rand: std.Random,
     compositor_state: *CompositorState,
     render_backend: rendering.RenderBackend,
-) !sphtud.event.net.Server(ServerCtx) {
+) !sphtud.event.net.Server(sphtud.event.LoopSphalloc, ServerCtx) {
     const xdg_runtime_dir = std.posix.getenv("XDG_RUNTIME_DIR") orelse return error.NoXdgRuntime;
 
     var idx: usize = 0;
@@ -60,7 +60,7 @@ pub fn makeWaylandServer(
         break :blk ret;
     };
 
-    return sphtud.event.net.server(net_serv, ServerCtx{
+    return sphtud.event.net.server(sphtud.event.LoopSphalloc, net_serv, ServerCtx{
         .server_alloc = server_alloc,
         .rand = rand,
         .compositor_state = compositor_state,
