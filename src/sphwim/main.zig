@@ -39,20 +39,24 @@ const PeriodicMemoryDumper = struct {
         };
     }
 
-    const vtable = sphtud.event.Handler.VTable{
+    const vtable = sphtud.event.LoopSphalloc.Handler.VTable{
         .poll = poll,
         .close = close,
     };
 
-    fn handler(self: *PeriodicMemoryDumper) sphtud.event.Handler {
+    fn handler(self: *PeriodicMemoryDumper) sphtud.event.LoopSphalloc.Handler {
         return .{
             .ptr = self,
             .fd = self.timer,
             .vtable = &vtable,
+            .desired_events = .{
+                .read = true,
+                .write = true,
+            },
         };
     }
 
-    fn poll(ctx: ?*anyopaque, _: *sphtud.event.Loop, _: sphtud.event.PollReason) sphtud.event.PollResult {
+    fn poll(ctx: ?*anyopaque, _: *sphtud.event.LoopSphalloc, _: sphtud.event.PollReason) sphtud.event.LoopSphalloc.PollResult {
         const self: *PeriodicMemoryDumper = @ptrCast(@alignCast(ctx));
         self.pollError() catch return .complete;
         return .in_progress;
@@ -138,7 +142,10 @@ pub fn main() !void {
         .backend_rendering_buf = null,
     };
 
-    var loop = try sphtud.event.Loop.init(&root_alloc);
+    var loop = try sphtud.event.LoopSphalloc.init(
+        root_alloc.arena(),
+        root_alloc.block_alloc.allocator(),
+    );
     try loop.register(renderer.handler());
 
     var rng_seed: u64 = undefined;
@@ -158,6 +165,6 @@ pub fn main() !void {
 
     while (true) {
         scratch.reset();
-        try loop.wait(&scratch);
+        try loop.wait(scratch.linear());
     }
 }

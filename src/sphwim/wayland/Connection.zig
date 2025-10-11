@@ -41,7 +41,7 @@ const typical_buffers = typical_surfaces * 2;
 const max_buffers = max_surfaces * 2;
 const display_id = 1;
 
-const vtable = sphtud.event.Handler.VTable{
+const vtable = sphtud.event.LoopSphalloc.Handler.VTable{
     .poll = poll,
     .close = close,
 };
@@ -81,11 +81,15 @@ pub fn init(
     };
 }
 
-pub fn handler(self: *Connection) sphtud.event.Handler {
+pub fn handler(self: *Connection) sphtud.event.LoopSphalloc.Handler {
     return .{
         .ptr = self,
         .vtable = &vtable,
         .fd = self.connection.stream.handle,
+        .desired_events = .{
+            .read = true,
+            .write = true,
+        },
     };
 }
 
@@ -110,7 +114,7 @@ pub fn updateRenderableHandle(self: *Connection, surface: WlSurfaceId, handle: C
     self.wl_surfaces.getPtr(surface).?.committed_buffer_handle = handle;
 }
 
-fn poll(ctx: ?*anyopaque, _: *sphtud.event.Loop, _: sphtud.event.PollReason) sphtud.event.PollResult {
+fn poll(ctx: ?*anyopaque, _: *sphtud.event.LoopSphalloc, _: sphtud.event.PollReason) sphtud.event.LoopSphalloc.PollResult {
     const self: *Connection = @ptrCast(@alignCast(ctx));
     var message_buf: [4096]u8 = undefined;
     var diagnostics = HandleMessageDiagnostics{

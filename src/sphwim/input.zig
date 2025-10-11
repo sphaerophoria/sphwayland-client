@@ -121,7 +121,7 @@ pub const InputHandler = struct {
     backend: InputBackend,
     compositor_state: *CompositorState,
 
-    pub fn handler(self: *InputHandler) sphtud.event.Handler {
+    pub fn handler(self: *InputHandler) sphtud.event.LoopSphalloc.Handler {
         return .{
             .fd = self.backend.fd,
             .ptr = self,
@@ -129,10 +129,14 @@ pub const InputHandler = struct {
                 .poll = poll,
                 .close = close,
             },
+            .desired_events = .{
+                .read = true,
+                .write = true,
+            },
         };
     }
 
-    fn poll(ctx: ?*anyopaque, _: *sphtud.event.Loop, _: sphtud.event.PollReason) sphtud.event.PollResult {
+    fn poll(ctx: ?*anyopaque, _: *sphtud.event.LoopSphalloc, _: sphtud.event.PollReason) sphtud.event.LoopSphalloc.PollResult {
         const self: *InputHandler = @ptrCast(@alignCast(ctx));
         self.backend.service(self.compositor_state) catch {
             input_logger.err("failed to service input backend, shutting down", .{});

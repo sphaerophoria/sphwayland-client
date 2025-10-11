@@ -89,20 +89,24 @@ pub const Renderer = struct {
     // compositor is rendering
     background_animation_state: f32 = 1.0,
 
-    const vtable = sphtud.event.Handler.VTable{
+    const vtable = sphtud.event.LoopSphalloc.Handler.VTable{
         .poll = poll,
         .close = close,
     };
 
-    pub fn handler(self: *Renderer) sphtud.event.Handler {
+    pub fn handler(self: *Renderer) sphtud.event.LoopSphalloc.Handler {
         return .{
             .ptr = self,
             .fd = self.render_backend.event_fd,
+            .desired_events = .{
+                .read = true,
+                .write = true,
+            },
             .vtable = &vtable,
         };
     }
 
-    fn poll(ctx: ?*anyopaque, _: *sphtud.event.Loop, reason: sphtud.event.PollReason) sphtud.event.PollResult {
+    fn poll(ctx: ?*anyopaque, _: *sphtud.event.LoopSphalloc, reason: sphtud.event.PollReason) sphtud.event.LoopSphalloc.PollResult {
         const self: *Renderer = @ptrCast(@alignCast(ctx));
         self.pollError(reason) catch |e| {
             logger.err("Failed to poll: {t}", .{e});
