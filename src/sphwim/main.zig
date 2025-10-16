@@ -116,7 +116,12 @@ pub fn main() !void {
 
     initializeGlParams();
 
-    var compositor_state = try CompositorState.init(&root_alloc, &scratch, preferred_size, render_backend);
+    var rng_seed: u64 = undefined;
+    try std.posix.getrandom(std.mem.asBytes(&rng_seed));
+    var rng = std.Random.DefaultPrng.init(rng_seed);
+
+
+    var compositor_state = try CompositorState.init(&root_alloc, &scratch, rng.random(), preferred_size, render_backend);
     var memory_dumper = try PeriodicMemoryDumper.init(&root_alloc, &scratch);
 
     var gl_alloc = try sphtud.render.GlAlloc.init(&root_alloc);
@@ -147,10 +152,6 @@ pub fn main() !void {
         root_alloc.block_alloc.allocator(),
     );
     try loop.register(renderer.handler());
-
-    var rng_seed: u64 = undefined;
-    try std.posix.getrandom(std.mem.asBytes(&rng_seed));
-    var rng = std.Random.DefaultPrng.init(rng_seed);
 
     var server = try wayland.makeWaylandServer(
         try root_alloc.makeSubAlloc("server"),

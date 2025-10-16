@@ -166,9 +166,10 @@ pub const Renderer = struct {
 
         defer self.frame_gl_alloc.reset();
 
-        var renderable_it = renderables.buffers.iter();
-        while (renderable_it.next()) |buffer| {
-            const texture = importTexture(self.frame_gl_alloc, self.egl_ctx, buffer.*) catch |e| {
+        var renderable_it = renderables.storage.iter();
+        while (renderable_it.next()) |item| {
+            const buffer = item.val.buffer;
+            const texture = importTexture(self.frame_gl_alloc, self.egl_ctx, buffer) catch |e| {
                 logger.warn("failed to import texture {t}, skipping window", .{e});
                 continue;
             };
