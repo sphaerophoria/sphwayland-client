@@ -20,6 +20,9 @@ pub fn init() !rendering.RenderBackend {
     return .{
         .ctx = null,
         .event_fd = fd,
+        // FIXME: How do we select if we don't have anywhere we are
+        // rendering???
+        .device_path = "/dev/dri/card0",
         .vtable = &.{
             .displayBuffer = displayBuffer,
             .currentResolution = currentResolution,

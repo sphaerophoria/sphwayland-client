@@ -38,14 +38,17 @@ pub const GbmContext = struct {
         }
     };
 
+    // FIXME: Should come from wayland
     const format = c.GBM_FORMAT_XRGB8888;
 
     pub fn init(
         init_width: u32,
         init_height: u32,
+        desired_device: []const u8,
     ) !GbmContext {
         // Would be nice if user could choose
-        const device_path = "/dev/dri/card0";
+        const device_path = desired_device;
+        std.debug.print("{s}\n", .{device_path});
         const f = try std.fs.openFileAbsolute(device_path, .{ .mode = .read_write });
         errdefer f.close();
 

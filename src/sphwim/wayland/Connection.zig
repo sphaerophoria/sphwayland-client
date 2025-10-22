@@ -6,6 +6,7 @@ const Bindings = @import("wayland_bindings");
 const wlio = @import("wlio");
 const CompositorState = @import("../CompositorState.zig");
 const FdPool = @import("../FdPool.zig");
+const system_gl = @import("../system_gl.zig");
 
 const Connection = @This();
 
@@ -20,6 +21,7 @@ io_reader: *std.Io.Reader,
 io_writer: *std.Io.Writer,
 
 compositor_state: *CompositorState,
+gbm_context: *const system_gl.GbmContext,
 
 interface_registry: InterfaceRegistry,
 wl_surfaces: sphtud.util.AutoHashMapSphalloc(WlSurfaceId, Surface),
@@ -51,6 +53,7 @@ pub fn init(
     connection: std.net.Server.Connection,
     rand: std.Random,
     compositor_state: *CompositorState,
+    gbm_context: *const system_gl.GbmContext,
 ) !Connection {
     const stream_writer = try alloc.arena().create(std.net.Stream.Writer);
     stream_writer.* = connection.stream.writer(try alloc.arena().alloc(u8, 4096));
@@ -72,6 +75,7 @@ pub fn init(
         .io_writer = io_writer,
         .io_reader = io_reader,
         .compositor_state = compositor_state,
+        .gbm_context = gbm_context,
         .interface_registry = try .init(alloc),
         .wl_surfaces = try .init(alloc.arena(), alloc.block_alloc.allocator(), typical_surfaces, max_surfaces),
         .xdg_surfaces = try .init(alloc.arena(), alloc.block_alloc.allocator(), typical_surfaces, max_surfaces),
@@ -598,6 +602,16 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
                 const zwp_buf_params_id = ZwpBufferParamsId{ .inner = params.params_id };
                 try self.zwp_params.put(zwp_buf_params_id, null);
                 try self.interface_registry.put(params.params_id, .zwp_linux_buffer_params_v1, diagnostics);
+            },
+            .get_default_feedback => |params| {
+
+                // If we implement GPU switching later, this will have to be stored and notified, but for now it's nbd :)
+                const feedback_interface = Bindings.ZwpLinuxDmabufFeedbackV1 { .id = params.id };
+
+                const devt = self.gbm_context.getDevt() catch |e| {
+                    return diagnostics.makeInternalErr("Failed to get devt handle {t}", .{e});
+                };
+                try feedback_interface.mainDevice(self.io_writer, .{ .device = std.mem.asBytes(&devt) });
             },
             else => {
                 logUnhandledRequest(object_id, req);

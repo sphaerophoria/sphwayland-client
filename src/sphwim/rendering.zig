@@ -29,6 +29,7 @@ pub const Resolution = struct {
 pub const RenderBackend = struct {
     ctx: ?*anyopaque,
     event_fd: std.posix.fd_t,
+    device_path: []const u8,
     vtable: *const VTable,
 
     const VTable = struct {
@@ -60,6 +61,9 @@ pub fn initRenderBackend(alloc: std.mem.Allocator) !RenderBackend {
         return backend;
     } else |e| {
         logger.info("Failed to init drm render backend: {t}", .{e});
+        if (@errorReturnTrace()) |st| {
+            logger.info("{f}", .{st});
+        }
     }
 
     logger.warn("Failed to init render backend, using null backend", .{});
