@@ -29,6 +29,7 @@ pub const Resolution = struct {
 pub const RenderBackend = struct {
     ctx: ?*anyopaque,
     event_fd: std.posix.fd_t,
+    device_path: []const u8,
     vtable: *const VTable,
 
     const VTable = struct {

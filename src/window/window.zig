@@ -68,6 +68,50 @@ fn bindInterfaces(client: *wlclient.Client(wlb)) !BoundInterfaces {
     };
 }
 
+
+fn resolveDriHandleFromDevt(alloc: std.mem.Allocator, val_opt: ?u64) ![]const u8 {
+    const default_card = "/dev/dri/card0";
+    const val = val_opt orelse {
+        std.log.warn("No GPU provided by compositor, using default", .{});
+        return default_card;
+    };
+
+    var dir = try std.fs.openDirAbsolute("/dev/dri", .{ .iterate = true } );
+    defer dir.close();
+
+    var it = dir.iterate();
+
+    while (try it.next()) |entry|{
+        const stat = try std.posix.fstatat(dir.fd, entry.name, 0);
+        if (stat.rdev == val) {
+            return try std.fs.path.join(alloc, &.{"/dev/dri", entry.name});
+        }
+    }
+
+    std.log.warn("Could not find render handle, returning default", .{});
+    return default_card;
+}
+
+fn registerForDmaBufFeedback(alloc: std.mem.Allocator, client: *wlclient.Client(wlb)) ![]const u8 {
+    var it = client.eventIt();
+    try it.retrieveEvents();
+
+    var main_device_dev_t: ?u64 = null;
+
+    while (try it.getAvailableEvent()) |event| switch (event.event) {
+        .zwp_linux_dmabuf_feedback_v1 => |feedback| switch (feedback) {
+            .main_device => |device| {
+                std.debug.print("Got main device {any}\n", .{device.device});
+                main_device_dev_t = std.mem.bytesToValue(u64, device.device);
+            },
+            else => wlclient.logUnusedEvent(event.event),
+        },
+        else => wlclient.logUnusedEvent(event.event),
+    };
+
+    return try resolveDriHandleFromDevt(alloc, main_device_dev_t);
+}
+
 pub const Window = struct {
     egl_ctx: system.EglContext,
     gbm_ctx: system.GbmContext,
@@ -91,7 +135,16 @@ pub const Window = struct {
 
         const bound_interfaces = try bindInterfaces(&client);
 
-        var gbm_context = try system.GbmContext.init(640, 480);
+        const surface_feedback = try client.newId(wlb.ZwpLinuxDmabufFeedbackV1);
+        try bound_interfaces.dmabuf.getDefaultFeedback(writer, .{
+            .id = surface_feedback.id,
+        });
+
+        var desired_gpu_device_buf: [4096]u8 = undefined;
+        var desired_gpu_alloc = std.heap.FixedBufferAllocator.init(&desired_gpu_device_buf);
+        const desired_gpu_device = try registerForDmaBufFeedback(desired_gpu_alloc.allocator(), &client);
+
+        var gbm_context = try system.GbmContext.init(640, 480, desired_gpu_device);
         errdefer gbm_context.deinit();
 
         var egl_context = try system.EglContext.init(alloc, gbm_context);

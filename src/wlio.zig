@@ -38,6 +38,9 @@ pub fn writeWlMessage(writer: *std.io.Writer, elem: anytype, id: u32) !void {
                 try writeString(writer, @field(elem, field.name));
             },
             void => {},
+            []const u8 => {
+                try writeArray(writer, @field(elem, field.name));
+            },
             else => {
                 @compileError("Unsupported field " ++ field.name);
             },

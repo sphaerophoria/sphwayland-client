@@ -20,6 +20,7 @@ pub fn init() !rendering.RenderBackend {
     return .{
         .ctx = null,
         .event_fd = fd,
+        .device_path = "/dev/dri/card0",
         .vtable = &.{
             .displayBuffer = displayBuffer,
             .currentResolution = currentResolution,

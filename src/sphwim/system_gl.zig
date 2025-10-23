@@ -48,9 +48,8 @@ pub const GbmContext = struct {
     pub fn init(
         init_width: u32,
         init_height: u32,
+        device_path: []const u8,
     ) !GbmContext {
-        // Would be nice if user could choose
-        const device_path = "/dev/dri/card0";
         const f = try std.fs.openFileAbsolute(device_path, .{ .mode = .read_write });
         errdefer f.close();
 
@@ -83,6 +82,11 @@ pub const GbmContext = struct {
         c.gbm_surface_destroy(self.surface);
         c.gbm_device_destroy(self.device);
         self.drm_handle.close();
+    }
+
+    pub fn getDevt(self: GbmContext) !u64 {
+        const stat = try std.posix.fstat(self.drm_handle.handle);
+        return stat.rdev;
     }
 };
 

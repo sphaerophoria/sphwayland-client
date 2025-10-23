@@ -106,7 +106,7 @@ pub fn main() !void {
 
     const preferred_size = try render_backend.currentResolution();
 
-    var gbm_context = try system_gl.GbmContext.init(preferred_size.width, preferred_size.height);
+    var gbm_context = try system_gl.GbmContext.init(preferred_size.width, preferred_size.height, render_backend.device_path);
     errdefer gbm_context.deinit();
 
     var egl_context = try system_gl.EglContext.init(root_alloc.arena(), gbm_context);
@@ -159,6 +159,7 @@ pub fn main() !void {
         rng.random(),
         &compositor_state,
         render_backend,
+        &gbm_context,
     );
     try loop.register(server.handler());
     try loop.register(memory_dumper.handler());
