@@ -263,6 +263,8 @@ const GPUSelectionInfo = struct {
             };
             defer c.drmModeFreeConnector(connector);
 
+            if (connector.connection != c.DRM_MODE_CONNECTED) continue;
+
             const is_internal = isInternal(connector.connector_type);
             const is_non_desktop = if (is_internal) false else try isNonDesktop(
                 f.handle,
