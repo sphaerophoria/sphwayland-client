@@ -7,6 +7,7 @@ const FdPool = @import("FdPool.zig");
 const CompositorState = @import("CompositorState.zig");
 const system_gl = @import("system_gl.zig");
 const gl = sphtud.render.gl;
+const cursor_img = @import("cursor.zig");
 
 const logger = std.log.scoped(.rendering);
 
@@ -89,11 +90,46 @@ pub const Renderer = struct {
     // Eventually we won't need this, but for now it's useful to prove that the
     // compositor is rendering
     background_animation_state: f32 = 1.0,
+    cursor_tex: sphtud.render.Texture,
 
     const vtable = sphtud.event.LoopSphalloc.Handler.VTable{
         .poll = poll,
         .close = close,
     };
+
+    pub fn init(
+        alloc: *sphtud.alloc.Sphalloc,
+        scratch: sphtud.alloc.LinearAllocator,
+        gl_alloc: *sphtud.render.GlAlloc,
+        egl_ctx: *system_gl.EglContext,
+        gbm_ctx: *system_gl.GbmContext,
+        render_backend: RenderBackend,
+        compositor_state: *CompositorState,
+        image_renderer: sphtud.render.xyuvt_program.ImageRenderer,
+    ) !Renderer {
+        const cp = scratch.checkpoint();
+        defer scratch.restore(cp);
+
+        const rgba_data = try cursor_img.makeRgba(scratch.allocator());
+        const cursor_tex = try sphtud.render.makeTextureFromRgba(
+            gl_alloc,
+            rgba_data,
+            cursor_img.width,
+        );
+
+        return .{
+            .frame_gl_alloc = try gl_alloc.makeSubAlloc(alloc),
+            .render_backend = render_backend,
+            .last_render_time = try std.time.Instant.now(),
+            .compositor_state = compositor_state,
+            .egl_ctx = egl_ctx,
+            .gbm_ctx = gbm_ctx,
+            .render_in_progress = false,
+            .image_renderer = image_renderer,
+            .backend_rendering_buf = null,
+            .cursor_tex = cursor_tex,
+        };
+    }
 
     pub fn handler(self: *Renderer) sphtud.event.LoopSphalloc.Handler {
         return .{
@@ -223,13 +259,13 @@ pub const Renderer = struct {
             1.0,
             -1.0,
         ).then(.scale(
-            20.0 / half_width,
-            20.0 / half_height,
+            cursor_img.width / half_width / 2,
+            cursor_img.height / half_height / 2,
         )).then(.translate(
             -1.0 + self.compositor_state.cursor_pos.x / half_width,
             1.0 - self.compositor_state.cursor_pos.y / half_height,
         ));
-        self.image_renderer.renderTexture(.invalid, transform);
+        self.image_renderer.renderTexture(self.cursor_tex, transform);
     }
 };
 

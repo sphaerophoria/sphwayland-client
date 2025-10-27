@@ -89,6 +89,8 @@ fn debugCallback(_: gl.GLenum, _: gl.GLenum, _: gl.GLuint, _: gl.GLenum, length:
 pub fn initializeGlParams() void {
     gl.glEnable(gl.GL_DEBUG_OUTPUT);
     gl.glDebugMessageCallback(debugCallback, null);
+    gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA);
+    gl.glEnable(gl.GL_BLEND);
 }
 
 pub fn main() !void {
@@ -134,17 +136,16 @@ pub fn main() !void {
         .compositor_state = &compositor_state,
     };
 
-    var renderer = rendering.Renderer{
-        .frame_gl_alloc = try gl_alloc.makeSubAlloc(&root_alloc),
-        .render_backend = render_backend,
-        .last_render_time = try std.time.Instant.now(),
-        .compositor_state = &compositor_state,
-        .egl_ctx = &egl_context,
-        .gbm_ctx = &gbm_context,
-        .render_in_progress = false,
-        .image_renderer = image_renderer,
-        .backend_rendering_buf = null,
-    };
+    var renderer = try rendering.Renderer.init(
+        &root_alloc,
+        scratch.linear(),
+        &gl_alloc,
+        &egl_context,
+        &gbm_context,
+        render_backend,
+        &compositor_state,
+        image_renderer,
+    );
 
     var loop = try sphtud.event.LoopSphalloc.init(
         root_alloc.arena(),
