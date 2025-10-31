@@ -356,6 +356,8 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
         .xdg_wm_base,
         .zxdg_decoration_manager_v1,
         .zwp_linux_dmabuf_v1,
+        .wl_seat,
+        .wl_shm,
     };
 
     switch (req) {
@@ -384,10 +386,15 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
         },
         .wl_registry => |parsed| switch (parsed) {
             .bind => |params| {
-                // FIXME: If binding to zwp_linux_dmabuf_v1, emit formats and modifiers we support
                 const interface: Bindings.WaylandInterfaceType = @enumFromInt(params.name);
                 try self.interface_registry.put(params.id, interface, diagnostics);
             },
+        },
+        .wl_region => |parsed| switch (parsed) {
+            .destroy => {
+                self.interface_registry.remove(object_id);
+            },
+            else => logUnhandledRequest(object_id, req),
         },
         .wl_compositor => |parsed| switch (parsed) {
             .create_surface => |params| {
@@ -395,10 +402,24 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
                 try self.wl_surfaces.put(wl_surface_id, .{});
                 try self.interface_registry.put(params.id, .wl_surface, diagnostics);
             },
+            .create_region => |params| {
+                try self.interface_registry.put(params.id, .wl_region, diagnostics);
+            },
+        },
+        .wl_shm => |parsed| switch (parsed) {
+            .create_pool => |params| {
+                try self.interface_registry.put(params.id, .wl_shm_pool, diagnostics);
+            },
             else => {
                 logUnhandledRequest(object_id, req);
                 return;
             },
+        },
+        .wl_shm_pool => |parsed| switch (parsed) {
+            .destroy => {
+                self.interface_registry.remove(object_id);
+            },
+            else => logUnhandledRequest(object_id, req),
         },
         .xdg_wm_base => |parsed| switch (parsed) {
             .get_xdg_surface => |params| {
@@ -414,12 +435,7 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
                 try self.xdg_surfaces.put(xdg_id, wl_surface_id);
                 try self.interface_registry.put(params.id, .xdg_surface, diagnostics);
 
-                surface.outstanding_xdg_configure = self.rand.int(u32);
-
-                var xdg_surf = Bindings.XdgSurface{ .id = xdg_id.inner };
-                try xdg_surf.configure(self.io_writer, .{
-                    .serial = surface.outstanding_xdg_configure.?,
-                });
+                try self.emitXdgSurfaceConfigure(xdg_id, surface);
             },
             else => {
                 logUnhandledRequest(object_id, req);
@@ -431,6 +447,18 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
                 const toplevel_id = XdgToplevelId{ .inner = params.id };
                 try self.windows.put(toplevel_id, .{});
                 try self.interface_registry.put(params.id, .xdg_toplevel, diagnostics);
+                const toplevel = Bindings.XdgToplevel{ .id = params.id };
+
+                try toplevel.configure(self.io_writer, .{
+                    .width = 0,
+                    .height = 0,
+                    .states = &.{},
+                });
+
+                const xdg_surface_id = XdgSurfaceId{ .inner = object_id };
+                const surface = try self.getXdgSurface(xdg_surface_id, .interface, diagnostics);
+
+                try self.emitXdgSurfaceConfigure(xdg_surface_id, surface);
             },
             .ack_configure => |params| {
                 const xdg_surface_id = XdgSurfaceId{ .inner = object_id };
@@ -629,14 +657,20 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
             },
         },
         .zxdg_decoration_manager_v1 => |parsed| switch (parsed) {
-            .get_toplevel_decoration => |_| {
-                logUnhandledRequest(object_id, req);
+            .get_toplevel_decoration => |params| {
+                try self.interface_registry.put(params.id, .zxdg_toplevel_decoration_v1, diagnostics);
             },
             // FIXME: handle destroy
             else => {
                 logUnhandledRequest(object_id, req);
                 return;
             },
+        },
+        .zxdg_toplevel_decoration_v1 => |parsed| switch (parsed) {
+            .destroy => {
+                self.interface_registry.remove(object_id);
+            },
+            else => logUnhandledRequest(object_id, req),
         },
         .wl_buffer => |params| switch (params) {
             .destroy => {
@@ -774,6 +808,15 @@ fn sendSurfaceFeedback(self: *Connection, params: anytype, diagnostics: *HandleM
 
     try feedback_interface.done(self.io_writer, .{});
     try self.interface_registry.put(params.id, .zwp_linux_dmabuf_feedback_v1, diagnostics);
+}
+
+fn emitXdgSurfaceConfigure(self: *Connection, id: XdgSurfaceId, surface: *Surface) !void {
+    surface.outstanding_xdg_configure = self.rand.int(u32);
+
+    var xdg_surf = Bindings.XdgSurface{ .id = id.inner };
+    try xdg_surf.configure(self.io_writer, .{
+        .serial = surface.outstanding_xdg_configure.?,
+    });
 }
 
 const IdSource = enum {
