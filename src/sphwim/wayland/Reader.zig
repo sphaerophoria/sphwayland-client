@@ -77,19 +77,23 @@ fn stream(r: *std.Io.Reader, writer: *std.Io.Writer, limit: std.Io.Limit) error{
     if (msg_header.controllen >= @sizeOf(CmsgHdr)) blk: {
         const hdr = std.mem.bytesToValue(CmsgHdr, &control);
         if (hdr.cmsg_level == std.os.linux.SOL.SOCKET) {
-            const fd: c_int = std.mem.bytesToValue(c_int, control[fd_cmsg.fd_cmsg_data_offs..][0..4]);
+            var offs: usize = fd_cmsg.fd_cmsg_data_offs;
+            while (offs < hdr.cmsg_len) {
+                const fd: c_int = std.mem.bytesToValue(c_int, control[fd_cmsg.fd_cmsg_data_offs..][0..4]);
+                offs += 4;
 
-            self.fd_pool.register(fd) catch {
-                std.log.err("Dropped file descriptor", .{});
-                std.posix.close(fd);
-                break :blk;
-            };
+                self.fd_pool.register(fd) catch {
+                    std.log.err("Dropped file descriptor", .{});
+                    std.posix.close(fd);
+                    break :blk;
+                };
 
-            self.fd_list.pushNoClobber(fd) catch {
-                std.log.err("Dropped file descriptor", .{});
-                self.fd_pool.close(fd);
-                break :blk;
-            };
+                self.fd_list.pushNoClobber(fd) catch {
+                    std.log.err("Dropped file descriptor", .{});
+                    self.fd_pool.close(fd);
+                    break :blk;
+                };
+            }
         }
     }
 
