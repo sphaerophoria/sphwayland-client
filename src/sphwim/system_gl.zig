@@ -56,8 +56,7 @@ pub const GbmContext = struct {
         const device = c.gbm_create_device(f.handle) orelse return error.GbmDeviceInit;
         errdefer c.gbm_device_destroy(device);
 
-        var modifiers: u64 = 0;
-        const surface = c.gbm_surface_create_with_modifiers2(device, init_width, init_height, format, &modifiers, 1, c.GBM_BO_USE_SCANOUT | c.GBM_BO_USE_RENDERING) orelse return error.GbmSurfaceInit;
+        const surface = c.gbm_surface_create(device, init_width, init_height, format, c.GBM_BO_USE_SCANOUT | c.GBM_BO_USE_RENDERING) orelse return error.GbmSurfaceInit;
         errdefer c.gbm_surface_destroy(surface);
 
         return .{
