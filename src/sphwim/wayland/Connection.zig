@@ -7,11 +7,16 @@ const wlio = @import("wlio");
 const CompositorState = @import("../CompositorState.zig");
 const FdPool = @import("../FdPool.zig");
 const system_gl = @import("../system_gl.zig");
+const server = @import("../wayland.zig");
+const wl_cmsg = @import("wl_cmsg");
 
 const Connection = @This();
 
 alloc: *sphtud.alloc.Sphalloc,
+scratch: sphtud.alloc.LinearAllocator,
 fd_pool: *FdPool,
+
+format_table: server.FormatTable,
 
 rand: std.Random,
 
@@ -50,10 +55,12 @@ const vtable = sphtud.event.LoopSphalloc.Handler.VTable{
 
 pub fn init(
     alloc: *sphtud.alloc.Sphalloc,
+    scratch: sphtud.alloc.LinearAllocator,
     connection: std.net.Server.Connection,
     rand: std.Random,
     compositor_state: *CompositorState,
     gbm_context: *const system_gl.GbmContext,
+    format_table: server.FormatTable,
 ) !Connection {
     const stream_writer = try alloc.arena().create(std.net.Stream.Writer);
     stream_writer.* = connection.stream.writer(try alloc.arena().alloc(u8, 4096));
@@ -68,9 +75,11 @@ pub fn init(
 
     return .{
         .alloc = alloc,
+        .scratch = scratch,
         .connection = connection,
         .rand = rand,
         .fd_pool = fd_pool,
+        .format_table = format_table,
         .stream_reader = stream_reader,
         .io_writer = io_writer,
         .io_reader = io_reader,
@@ -604,18 +613,19 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
                 try self.interface_registry.put(params.params_id, .zwp_linux_buffer_params_v1, diagnostics);
             },
             .get_default_feedback => |params| {
-
-                // If we implement GPU switching later, this will have to be stored and notified, but for now it's nbd :)
-                const feedback_interface = Bindings.ZwpLinuxDmabufFeedbackV1{ .id = params.id };
-
-                const devt = self.gbm_context.getDevt() catch |e| {
-                    return diagnostics.makeInternalErr("Failed to get devt handle {t}", .{e});
-                };
-                try feedback_interface.mainDevice(self.io_writer, .{ .device = std.mem.asBytes(&devt) });
+                try self.sendSurfaceFeedback(params, diagnostics);
+            },
+            .get_surface_feedback => |params| {
+                try self.sendSurfaceFeedback(params, diagnostics);
             },
             else => {
                 logUnhandledRequest(object_id, req);
                 return;
+            },
+        },
+        .zwp_linux_dmabuf_feedback_v1 => |parsed| switch (parsed) {
+            .destroy => {
+                self.interface_registry.remove(object_id);
             },
         },
         .zxdg_decoration_manager_v1 => |parsed| switch (parsed) {
@@ -713,6 +723,57 @@ fn requiresFd(req: Bindings.WaylandIncomingMessage) bool {
             }
         },
     }
+}
+
+fn sendSurfaceFeedback(self: *Connection, params: anytype, diagnostics: *HandleMessageDiagnostics) !void {
+    // If we implement GPU switching later, this will have to be stored and notified, but for now it's nbd :)
+    const feedback_interface = Bindings.ZwpLinuxDmabufFeedbackV1{ .id = params.id };
+
+    const devt = self.gbm_context.getDevt() catch |e| {
+        return diagnostics.makeInternalErr("Failed to get devt handle {t}", .{e});
+    };
+    try feedback_interface.mainDevice(self.io_writer, .{ .device = std.mem.asBytes(&devt) });
+
+    {
+        var format_table_buf: [4096]u8 = undefined;
+        var format_table_writer = std.Io.Writer.fixed(&format_table_buf);
+        try feedback_interface.formatTable(&format_table_writer, .{
+            .fd = {},
+            .size = @intCast(self.format_table.len),
+        });
+
+        // Ensure ordering :)
+        try self.io_writer.flush();
+        wl_cmsg.sendMessageWithFdAttachment(self.connection.stream, format_table_writer.buffered(), self.format_table.fd) catch {
+            // All other writes get clobbered to WriteFailed by std.Io.Writer, we can do the same
+            return error.WriteFailed;
+        };
+    }
+
+    try feedback_interface.trancheTargetDevice(self.io_writer, .{
+        .device = std.mem.asBytes(&devt),
+    });
+    try feedback_interface.trancheFlags(self.io_writer, .{
+        .flags = 1,
+    });
+
+    {
+        const cp = self.scratch.checkpoint();
+        defer self.scratch.restore(cp);
+
+        const len = self.format_table.len / 16;
+        const indices = try self.scratch.allocator().alloc(u16, len);
+
+        for (0..len) |i| {
+            indices[i] = @intCast(i);
+        }
+        try feedback_interface.trancheFormats(self.io_writer, .{
+            .indices = @ptrCast(indices),
+        });
+    }
+
+    try feedback_interface.done(self.io_writer, .{});
+    try self.interface_registry.put(params.id, .zwp_linux_dmabuf_feedback_v1, diagnostics);
 }
 
 const IdSource = enum {

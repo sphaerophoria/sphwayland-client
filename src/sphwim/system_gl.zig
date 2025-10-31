@@ -1,3 +1,4 @@
+const sphtud = @import("sphtud");
 const std = @import("std");
 const c = @import("gl_system_bindings");
 const rendering = @import("rendering.zig");
@@ -91,10 +92,18 @@ pub const GbmContext = struct {
 
 pub const getProcAddress = c.eglGetProcAddress;
 
+// Zig currently cannot resolve the DRM modifier macros that generate invalid.
+// Copy paste a C printf, which I'm fairly confident is valid on all
+// platforms... Maybe not big endian platforms, but probably
+pub const drm_modifier_invalid = 0xffffffffffffff;
+
 pub const EglContext = struct {
     display: c.EGLDisplay,
     context: c.EGLContext,
     surface: c.EGLSurface,
+
+    eglQueryDmaBufFormatsEXT: c.PFNEGLQUERYDMABUFFORMATSEXTPROC,
+    eglQueryDmaBufModifiersEXT: c.PFNEGLQUERYDMABUFMODIFIERSEXTPROC,
 
     pub fn init(alloc: std.mem.Allocator, gbm_context: GbmContext) !EglContext {
         const display = c.eglGetDisplay(gbm_context.device);
@@ -164,6 +173,8 @@ pub const EglContext = struct {
             .display = display,
             .surface = surface,
             .context = context,
+            .eglQueryDmaBufFormatsEXT = @ptrCast(getProcAddress("eglQueryDmaBufFormatsEXT")),
+            .eglQueryDmaBufModifiersEXT = @ptrCast(getProcAddress("eglQueryDmaBufModifiersEXT")),
         };
     }
 
@@ -223,5 +234,140 @@ pub const EglContext = struct {
 
     pub fn freeEglImage(self: EglContext, image: c.EGLImage) void {
         _ = c.eglDestroyImage(self.display, image);
+    }
+
+    const FormatModifierIter = struct {
+        ctx: *const EglContext,
+        formats: []c.EGLint,
+
+        modifiers_buf: []c.EGLuint64KHR,
+        external_only_buf: []c.EGLBoolean,
+        modifiers_len: c.EGLint = modifiers_invalid,
+
+        format_idx: usize,
+        modifier_idx: usize,
+
+        const modifiers_invalid = -1;
+
+        pub const FormatModifierPair = struct {
+            format: u32,
+            modifier: u64,
+        };
+
+        pub fn next(self: *FormatModifierIter) !?FormatModifierPair {
+            while (true) {
+                if (self.format_idx >= self.formats.len) return null;
+
+                const modifiers = try self.modifiersSlice();
+
+                if (self.modifier_idx >= modifiers.modifiers.len) {
+                    self.format_idx += 1;
+                    self.modifier_idx = 0;
+                    self.modifiers_len = modifiers_invalid;
+                    continue;
+                }
+
+                defer self.modifier_idx += 1;
+
+                if (modifiers.external_only[self.modifier_idx] == c.EGL_TRUE) {
+                    continue;
+                }
+
+                return .{
+                    .format = @bitCast(self.formats[self.format_idx]),
+                    .modifier = @bitCast(modifiers.modifiers[self.modifier_idx]),
+                };
+            }
+        }
+
+        const ModifiersWithExtOnly = struct {
+            modifiers: []c.EGLuint64KHR,
+            external_only: []c.EGLBoolean,
+        };
+
+        fn modifiersSlice(self: *FormatModifierIter) !ModifiersWithExtOnly {
+            if (self.modifiers_len == modifiers_invalid) {
+                const success = self.ctx.eglQueryDmaBufModifiersEXT.?(
+                    self.ctx.display,
+                    self.formats[self.format_idx],
+                    @intCast(self.modifiers_buf.len),
+                    self.modifiers_buf.ptr,
+                    self.external_only_buf.ptr,
+                    &self.modifiers_len,
+                );
+                if (success != c.EGL_TRUE) return error.RetrieveModifiers;
+            }
+
+            if (self.modifiers_len < 0) return error.InvalidModifiers;
+
+            // We need a modifier to return a format/modifier pair. The use
+            // case for our initial impl is to generate format/modifier table
+            // for wayland clients. The wayland spec allows us to use invalid
+            // as a placeholder to inform the client not to try to use
+            // modifiers at all. We can re-use this definition everywhere
+            //
+            // Doing this here is easier than special casing in next()
+            if (self.modifiers_len == 0) {
+                self.modifiers_len = 1;
+                self.modifiers_buf[0] = drm_modifier_invalid;
+                self.external_only_buf[0] = c.EGL_FALSE;
+            }
+
+            return .{
+                .modifiers = self.modifiers_buf[0..@intCast(self.modifiers_len)],
+                .external_only = self.external_only_buf[0..@intCast(self.modifiers_len)],
+            };
+        }
+    };
+
+    pub fn formatModifierIter(self: *const EglContext, alloc: std.mem.Allocator) !FormatModifierIter {
+        var num_formats: c.EGLint = 0;
+
+        if (self.eglQueryDmaBufFormatsEXT.?(
+            self.display,
+            0,
+            null,
+            &num_formats,
+        ) != c.EGL_TRUE) {
+            return error.QueryNumFormats;
+        }
+
+        if (num_formats <= 0) {
+            return error.InvalidNumFormats;
+        }
+
+        const formats = try alloc.alloc(c.EGLint, @intCast(num_formats));
+
+        if (self.eglQueryDmaBufFormatsEXT.?(
+            self.display,
+            num_formats,
+            formats.ptr,
+            &num_formats,
+        ) != c.EGL_TRUE) {
+            return error.QueryNumFormats;
+        }
+
+        // If all modifiers are 0, we still buffer 1 to inject with invalid for
+        // that format
+        var max_modifiers: c.EGLint = 1;
+
+        for (formats) |format| {
+            var format_modifier_size: c.EGLint = 0;
+            if (self.eglQueryDmaBufModifiersEXT.?(self.display, format, 0, null, null, &format_modifier_size) != c.EGL_TRUE) {
+                return error.QueryNumModifiers;
+            }
+
+            max_modifiers = @max(max_modifiers, format_modifier_size);
+        }
+
+        return .{
+            .ctx = self,
+            .formats = formats,
+            .modifiers_buf = try alloc.alloc(c.EGLuint64KHR, @intCast(max_modifiers)),
+            .external_only_buf = try alloc.alloc(c.EGLBoolean, @intCast(max_modifiers)),
+            .modifiers_len = FormatModifierIter.modifiers_invalid,
+            .format_idx = 0,
+            .modifier_idx = 0,
+        };
     }
 };

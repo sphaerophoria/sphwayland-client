@@ -160,6 +160,7 @@ pub fn main() !void {
         &compositor_state,
         render_backend,
         &gbm_context,
+        &egl_context,
     );
     try loop.register(server.handler());
     try loop.register(memory_dumper.handler());
