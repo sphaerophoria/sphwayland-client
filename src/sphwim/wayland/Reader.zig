@@ -1,6 +1,6 @@
 const std = @import("std");
 const sphtud = @import("sphtud");
-const fd_cmsg = @import("fd_cmsg");
+const wl_cmsg = @import("wl_cmsg");
 const FdPool = @import("../FdPool.zig");
 
 const Reader = @This();
@@ -31,13 +31,6 @@ pub fn init(alloc: std.mem.Allocator, fd_pool: *FdPool, socket: std.net.Stream) 
     };
 }
 
-// FIXME: duplicated with client
-const CmsgHdr = extern struct {
-    cmsg_len: usize,
-    cmsg_level: c_int,
-    cmsg_type: c_int,
-};
-
 fn stream(r: *std.Io.Reader, writer: *std.Io.Writer, limit: std.Io.Limit) error{ EndOfStream, ReadFailed, WriteFailed }!usize {
     const self: *Reader = @fieldParentPtr("interface", r);
     self.last_res = .SUCCESS;
@@ -49,7 +42,7 @@ fn stream(r: *std.Io.Reader, writer: *std.Io.Writer, limit: std.Io.Limit) error{
         .len = dest.len,
     }};
 
-    var control: [fd_cmsg.fd_cmsg_space]u8 = undefined;
+    var control: [wl_cmsg.max_buf_size]u8 = undefined;
     var msg_header = std.os.linux.msghdr{
         .name = null,
         .namelen = 0,
@@ -74,12 +67,12 @@ fn stream(r: *std.Io.Reader, writer: *std.Io.Writer, limit: std.Io.Limit) error{
         },
     }
 
-    if (msg_header.controllen >= @sizeOf(CmsgHdr)) blk: {
-        const hdr = std.mem.bytesToValue(CmsgHdr, &control);
+    if (msg_header.controllen >= @sizeOf(wl_cmsg.CmsgHdr)) blk: {
+        const hdr = std.mem.bytesToValue(wl_cmsg.CmsgHdr, &control);
         if (hdr.cmsg_level == std.os.linux.SOL.SOCKET) {
-            var offs: usize = fd_cmsg.fd_cmsg_data_offs;
+            var offs: usize = wl_cmsg.fd_list_start;
             while (offs < hdr.cmsg_len) {
-                const fd: c_int = std.mem.bytesToValue(c_int, control[fd_cmsg.fd_cmsg_data_offs..][0..4]);
+                const fd: c_int = std.mem.bytesToValue(c_int, control[offs..][0..4]);
                 offs += 4;
 
                 self.fd_pool.register(fd) catch {

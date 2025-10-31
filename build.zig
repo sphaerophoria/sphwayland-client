@@ -51,27 +51,6 @@ const Builder = struct {
         });
     }
 
-    pub fn makeFdCmsg(self: Builder) *std.Build.Module {
-        const exe = self.b.addExecutable(.{
-            .name = "gen_zig_cmsg",
-            .root_module = self.b.createModule(.{
-                .target = self.b.graph.host,
-                .optimize = self.optimize,
-            }),
-        });
-        exe.root_module.addCSourceFile(.{
-            .file = self.b.path("build/gen_zig_cmsg.c"),
-        });
-        exe.linkLibC();
-
-        const run = self.b.addRunArtifact(exe);
-        const zig_source = run.addOutputFileArg("fd_cmsg.zig");
-
-        return self.b.createModule(.{
-            .root_source_file = zig_source,
-        });
-    }
-
     pub fn makeWlgen(self: Builder) *std.Build.Step.Compile {
         const wlgen = self.b.addExecutable(.{
             .name = "wlgen",
@@ -124,12 +103,39 @@ const Builder = struct {
             });
     }
 
-    pub fn makeWlClient(self: Builder, wlio: *std.Build.Module, fd_cmsg: *std.Build.Module) *std.Build.Module {
+    pub fn makeWlCmsg(self: Builder) *std.Build.Module {
+        const exe = self.b.addExecutable(.{
+            .name = "gen_zig_cmsg",
+            .root_module = self.b.createModule(.{
+                .target = self.b.graph.host,
+                .optimize = self.optimize,
+            }),
+        });
+        exe.root_module.addCSourceFile(.{
+            .file = self.b.path("build/gen_zig_cmsg.c"),
+        });
+        exe.linkLibC();
+
+        const run = self.b.addRunArtifact(exe);
+        const zig_source = run.addOutputFileArg("fd_cmsg.zig");
+
+        const fd_cmsg = self.b.createModule(.{
+            .root_source_file = zig_source,
+        });
+
+        const wlclient = self.b.addModule("wlcmsg", .{
+            .root_source_file = self.b.path("src/wlcmsg.zig"),
+        });
+        wlclient.addImport("fd_cmsg", fd_cmsg);
+        return wlclient;
+    }
+
+    pub fn makeWlClient(self: Builder, wlio: *std.Build.Module, wl_cmsg: *std.Build.Module) *std.Build.Module {
         const wlclient = self.b.addModule("wlclient", .{
             .root_source_file = self.b.path("src/wlclient.zig"),
         });
         wlclient.addImport("wlio", wlio);
-        wlclient.addImport("fd_cmsg", fd_cmsg);
+        wlclient.addImport("wl_cmsg", wl_cmsg);
         return wlclient;
     }
 
@@ -189,7 +195,7 @@ const Builder = struct {
         return exe;
     }
 
-    pub fn makeWm(self: Builder, wlio: *std.Build.Module, bindings: *std.Build.Module, sphtud: *std.Build.Module, fd_cmsg: *std.Build.Module) !*std.Build.Step.Compile {
+    pub fn makeWm(self: Builder, wlio: *std.Build.Module, bindings: *std.Build.Module, sphtud: *std.Build.Module, wl_cmsg: *std.Build.Module) !*std.Build.Step.Compile {
         const gl_bindings_translate_c = try self.translateCFixed("src/sphwim/gl_system_bindings.h");
         const gl_bindings = gl_bindings_translate_c.createModule();
 
@@ -208,7 +214,7 @@ const Builder = struct {
         exe.root_module.addImport("wlio", wlio);
         exe.root_module.addImport("wayland_bindings", bindings);
         exe.root_module.addImport("sphtud", sphtud);
-        exe.root_module.addImport("fd_cmsg", fd_cmsg);
+        exe.root_module.addImport("wl_cmsg", wl_cmsg);
         exe.root_module.addImport("gl_system_bindings", gl_bindings);
         exe.root_module.addImport("input", input_bindings);
 
@@ -256,15 +262,15 @@ pub fn build(b: *std.Build) !void {
     const wlio_mod = builder.makeWlio();
     const wlgen = builder.makeWlgen();
     const client_bindings = builder.makeClientBindings(wlgen, wlio_mod);
-    const fd_cmsg = builder.makeFdCmsg();
-    const wlclient = builder.makeWlClient(wlio_mod, fd_cmsg);
+    const wl_cmsg = builder.makeWlCmsg();
+    const wlclient = builder.makeWlClient(wlio_mod, wl_cmsg);
     const system_gl_bindings = try builder.makeSystemGlBindings();
     const sphwindow = try builder.makeWindow(wlio_mod, client_bindings, wlclient, system_gl_bindings);
     const example = try builder.makeWindowExample(sphwindow);
 
     const sphtud = builder.importSphtud();
     const server_bindings = builder.makeServerBindings(wlgen, wlio_mod);
-    const wm = try builder.makeWm(wlio_mod, server_bindings, sphtud, fd_cmsg);
+    const wm = try builder.makeWm(wlio_mod, server_bindings, sphtud, wl_cmsg);
 
     if (check) {
         b.getInstallStep().dependOn(&example.step);
