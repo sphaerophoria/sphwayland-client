@@ -187,9 +187,8 @@ fn fbFromRenderBuffer(self: *Drm, buffer: rendering.RenderBuffer) !u32 {
         c.DRM_MODE_FB_MODIFIERS,
     );
 
-    if (ret != 0) {
-        const errno = std.c._errno();
-        std.log.debug("Failed to call fb with modifiers {d}", .{errno.*});
+    if (ret == 0) {
+        return fb_id;
     }
 
     try drmErrCheck(
