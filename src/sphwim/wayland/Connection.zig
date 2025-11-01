@@ -30,7 +30,6 @@ gbm_context: *const system_gl.GbmContext,
 
 interface_registry: InterfaceRegistry,
 wl_surfaces: sphtud.util.AutoHashMapSphalloc(WlSurfaceId, Surface),
-wl_regions: sphtud.util.AutoHashMapSphalloc(WlRegionId, Region),
 wl_buffers: sphtud.util.AutoHashMapSphalloc(WlBufferId, *RefCountedRenderBuffer),
 zwp_params: sphtud.util.AutoHashMapSphalloc(ZwpBufferParamsId, ?BufferParams),
 xdg_surfaces: sphtud.util.AutoHashMapSphalloc(XdgSurfaceId, WlSurfaceId),
@@ -90,7 +89,7 @@ pub fn init(
         .interface_registry = try .init(alloc),
         .wl_surfaces = try .init(alloc.arena(), alloc.block_alloc.allocator(), typical_surfaces, max_surfaces),
         // FIXME: update guesses
-        .wl_regions = try .init(alloc.arena(), alloc.block_alloc.allocator(), typical_surfaces, max_surfaces),
+        //.wl_regions = try .init(alloc.arena(), alloc.block_alloc.allocator(), typical_surfaces, max_surfaces),
         .xdg_surfaces = try .init(alloc.arena(), alloc.block_alloc.allocator(), typical_surfaces, max_surfaces),
         .windows = try .init(alloc.arena(), alloc.block_alloc.allocator(), typical_windows, max_windows),
         .wl_buffers = try .init(alloc.arena(), alloc.block_alloc.allocator(), typical_surfaces, max_surfaces),
@@ -277,7 +276,6 @@ pub const XdgSurfaceId = struct { inner: u32 };
 pub const XdgToplevelId = struct { inner: u32 };
 pub const WlShmPoolId = struct { inner: u32 };
 pub const WlSurfaceId = struct { inner: u32 };
-pub const WlRegionId = struct { inner: u32 };
 pub const WlBufferId = struct { inner: u32 };
 pub const ZwpBufferParamsId = struct { inner: u32 };
 
@@ -394,30 +392,13 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
         },
         .wl_registry => |parsed| switch (parsed) {
             .bind => |params| {
-                // FIXME: If binding to zwp_linux_dmabuf_v1, emit formats and modifiers we support
                 const interface: Bindings.WaylandInterfaceType = @enumFromInt(params.name);
                 try self.interface_registry.put(params.id, interface, diagnostics);
-
-                switch (interface) {
-                    .wl_shm => {
-                        const wl_shm = Bindings.WlShm { .id = params.id };
-                        try wl_shm.format(self.io_writer, .{
-                            .format = std.mem.bytesToValue(u8, "XR24"),
-                        });
-                    },
-                    else => {},
-                }
             },
         },
         .wl_region => |parsed| switch (parsed) {
-            .add => |params| {
-                const wl_region_id = WlRegionId { .inner = object_id };
-                const region = self.wl_regions.getPtr(wl_region_id) orelse return diagnostics.makeInternalErr(
-                    "no region for {d}", .{object_id});
-
-                // FIXME: This is surely incorrect :)
-                region.width = @max(region.width, params.width);
-                region.height = @max(region.height, params.height);
+            .destroy => {
+                self.interface_registry.remove(object_id);
             },
             else => logUnhandledRequest(object_id, req),
         },
@@ -428,36 +409,34 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
                 try self.interface_registry.put(params.id, .wl_surface, diagnostics);
             },
             .create_region => |params| {
-                const wl_region_id = WlRegionId{ .inner = params.id };
-                try self.wl_regions.put(wl_region_id, .{});
                 try self.interface_registry.put(params.id, .wl_region, diagnostics);
             },
         },
-        .wl_shm_pool => |parsed| switch (parsed) {
-            .create_buffer => |params| {
-                if (true) unreachable;
-                const buf_id = WlBufferId { .inner = params.id };
-                const pool_id = WlShmPoolId { .inner = object_id };
+        //.wl_shm_pool => |parsed| switch (parsed) {
+        //    //.create_buffer => |params| {
+        //    //    const buf_id = WlBufferId { .inner = params.id };
+        //    //    const pool_id = WlShmPoolId { .inner = object_id };
 
-                const pool = self.wl_shm_pools.get(pool_id) orelse return diagnostics.makeInternalErr(
-                    "no pool for object {d}", .{object_id },
-                );
-                const buf = try RefCountedRenderBuffer.init(self.alloc.general(), buf_id, .{
-                    .fd = pool.fd,
-                    .plane_idx = 0,
-                    .offset = @bitCast(params.offset),
-                    .stride = @bitCast(params.stride),
-                    .modifier = 0,
-                }, params.width, params.height, params.format, 0);
-                errdefer buf.unref(self.alloc.general(), self.fd_pool);
+        //    //    const pool = self.wl_shm_pools.get(pool_id) orelse return diagnostics.makeInternalErr(
+        //    //        "no pool for object {d}", .{object_id },
+        //    //    );
+        //    //    const buf = try RefCountedRenderBuffer.init(self.alloc.general(), buf_id, .{
+        //    //        .fd = pool.fd,
+        //    //        .plane_idx = 0,
+        //    //        .offset = @bitCast(params.offset),
+        //    //        .stride = @bitCast(params.stride),
+        //    //        .modifier = 0,
+        //    //    }, params.width, params.height, params.format, 0);
+        //    //    errdefer buf.unref(self.alloc.general(), self.fd_pool);
 
-                try self.wl_buffers.put(buf_id, buf);
-            },
-            else => {
-                logUnhandledRequest(object_id, req);
-                return;
-            },
-        },
+        //    //    try self.wl_buffers.put(buf_id, buf);
+        //    //},
+        //    // FIXME: Handle destroy
+        //    else => {
+        //        logUnhandledRequest(object_id, req);
+        //        return;
+        //    },
+        //},
         .wl_shm => |parsed| switch (parsed) {
             .create_pool => |params| {
                 try self.wl_shm_pools.put(WlShmPoolId { .inner = params.id }, .{
@@ -508,8 +487,8 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
                 const xdg_surface_id = XdgSurfaceId { .inner = object_id };
                 const surface = try self.getXdgSurface(xdg_surface_id, .interface, diagnostics);
                 try toplevel.configure(self.io_writer, .{
-                    .width = surface.opaque_width,
-                    .height = surface.opaque_height,
+                    .width = 0,
+                    .height = 0,
                     .states = &.{},
                 });
 
@@ -625,16 +604,6 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
                 try global.deleteId(self.io_writer, .{
                     .id = object_id,
                 });
-            },
-            .set_opaque_region => |params| {
-                const region_id = WlRegionId { .inner = params.region };
-                const surface_id = WlSurfaceId { .inner = object_id };
-                const region = self.wl_regions.get(region_id) orelse return diagnostics.makeInvalidMethodError(
-                    "no region with id {d}", .{params.region}
-                );
-                const surface = try self.getWlSurface(surface_id, .interface, diagnostics);
-                surface.opaque_width = region.width;
-                surface.opaque_height = region.height;
             },
             else => {
                 logUnhandledRequest(object_id, req);
@@ -976,12 +945,6 @@ const BufferParams = struct {
     modifier: u64,
 };
 
-const Region = struct {
-    // Hack, it looks like the region is supposed to be more advanced than this :)
-    width: i32 = 1,
-    height: i32 = 1,
-};
-
 const Surface = struct {
     // Buffer currently attached, but not yet committed
     pending_buffer: ?*RefCountedRenderBuffer = null,
@@ -989,9 +952,6 @@ const Surface = struct {
     // Buffer currently committed
     committed_buffer: ?*RefCountedRenderBuffer = null,
     committed_buffer_handle: ?CompositorState.Renderables.Handle = null,
-
-    opaque_width: i32 = 1,
-    opaque_height: i32 = 1,
 
     callback_id: ?u32 = null,
     outstanding_xdg_configure: ?u32 = null,

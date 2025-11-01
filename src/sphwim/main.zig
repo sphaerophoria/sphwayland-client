@@ -9,7 +9,13 @@ const gl = sphtud.render.gl;
 const input = @import("input.zig");
 
 pub const std_options = std.Options{
-    .log_level = .warn,
+    .log_level = .debug,
+    //.log_scope_levels = &.{
+    //    .{
+    //        .scope = .rendering,
+    //        .level = .warn,
+    //    }
+    //},
 };
 
 const PeriodicMemoryDumper = struct {
