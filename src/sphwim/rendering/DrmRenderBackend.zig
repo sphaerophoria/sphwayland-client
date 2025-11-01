@@ -13,7 +13,6 @@ connector_id: u32,
 preferred_mode: c.drmModeModeInfo,
 crtc_set: bool = false,
 
-
 pub fn init(alloc: std.mem.Allocator) !rendering.RenderBackend {
     const best_gpu = try selectBestGPU(alloc);
     std.log.info("Rendering on GPU {s}", .{best_gpu});
@@ -257,7 +256,7 @@ const GPUSelectionInfo = struct {
         var count_display_ports: usize = 0;
 
         for (resources.connectors[0..@intCast(resources.count_connectors)]) |connector_id| {
-            const connector: *c.drmModeConnector  = c.drmModeGetConnectorCurrent(f.handle, connector_id) orelse {
+            const connector: *c.drmModeConnector = c.drmModeGetConnectorCurrent(f.handle, connector_id) orelse {
                 std.log.warn("Failed to get connector properties for connector {d}", .{connector_id});
                 continue;
             };
@@ -301,23 +300,22 @@ const GPUSelectionInfo = struct {
 
     fn isInternal(connector_type: u32) bool {
         // Fully stolen from kwin :)
-        return connector_type == c.DRM_MODE_CONNECTOR_LVDS or connector_type == c.DRM_MODE_CONNECTOR_eDP
-            or connector_type == c.DRM_MODE_CONNECTOR_DSI;
+        return connector_type == c.DRM_MODE_CONNECTOR_LVDS or connector_type == c.DRM_MODE_CONNECTOR_eDP or connector_type == c.DRM_MODE_CONNECTOR_DSI;
     }
 
     fn otherIsBetter(self: GPUSelectionInfo, other: GPUSelectionInfo) bool {
         if (other.num_internal_displays != self.num_internal_displays) {
-            std.log.debug("{s} has more internal displays than {s}", .{other.path, self.path});
+            std.log.debug("{s} has more internal displays than {s}", .{ other.path, self.path });
             return other.num_internal_displays > self.num_internal_displays;
         }
         if (other.num_external_displays != self.num_external_displays) {
-            std.log.debug("{s} has more external displays than {s}", .{other.path, self.path});
+            std.log.debug("{s} has more external displays than {s}", .{ other.path, self.path });
             return other.num_external_displays > self.num_external_displays;
         }
 
         const ret = self.num_display_ports > other.num_display_ports;
         if (ret) {
-            std.log.debug("{s} has more ports than {s}", .{other.path, self.path});
+            std.log.debug("{s} has more ports than {s}", .{ other.path, self.path });
         }
         return ret;
     }
@@ -336,7 +334,7 @@ fn selectBestGPU(alloc: std.mem.Allocator) ![]const u8 {
         defer f.close();
 
         const entry_info = GPUSelectionInfo.fromFile(entry.name, f) catch |e| {
-            std.log.warn("Failed to get GPU info for {s} ({t}), skipping\n", .{entry.name, e});
+            std.log.warn("Failed to get GPU info for {s} ({t}), skipping\n", .{ entry.name, e });
             continue;
         };
         if (best.otherIsBetter(entry_info)) {
@@ -344,6 +342,5 @@ fn selectBestGPU(alloc: std.mem.Allocator) ![]const u8 {
         }
     }
 
-    return try std.fs.path.join(alloc, &.{"/dev/dri", best.path});
-
+    return try std.fs.path.join(alloc, &.{ "/dev/dri", best.path });
 }

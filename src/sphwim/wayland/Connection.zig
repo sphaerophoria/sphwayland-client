@@ -606,7 +606,7 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
             .get_default_feedback => |params| {
 
                 // If we implement GPU switching later, this will have to be stored and notified, but for now it's nbd :)
-                const feedback_interface = Bindings.ZwpLinuxDmabufFeedbackV1 { .id = params.id };
+                const feedback_interface = Bindings.ZwpLinuxDmabufFeedbackV1{ .id = params.id };
 
                 const devt = self.gbm_context.getDevt() catch |e| {
                     return diagnostics.makeInternalErr("Failed to get devt handle {t}", .{e});

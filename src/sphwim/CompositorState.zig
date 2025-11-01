@@ -74,7 +74,7 @@ pub const Renderables = struct {
     pub fn init(alloc: *sphtud.alloc.Sphalloc, scratch: sphtud.alloc.LinearAllocator, random: std.Random) !Renderables {
         return .{
             .expansion_alloc = alloc.block_alloc.allocator(),
-            .storage = try.init(
+            .storage = try .init(
                 alloc.arena(),
                 100,
                 10000,

@@ -68,7 +68,6 @@ fn bindInterfaces(client: *wlclient.Client(wlb)) !BoundInterfaces {
     };
 }
 
-
 fn resolveDriHandleFromDevt(alloc: std.mem.Allocator, val_opt: ?u64) ![]const u8 {
     const default_card = "/dev/dri/card0";
     const val = val_opt orelse {
@@ -76,15 +75,15 @@ fn resolveDriHandleFromDevt(alloc: std.mem.Allocator, val_opt: ?u64) ![]const u8
         return default_card;
     };
 
-    var dir = try std.fs.openDirAbsolute("/dev/dri", .{ .iterate = true } );
+    var dir = try std.fs.openDirAbsolute("/dev/dri", .{ .iterate = true });
     defer dir.close();
 
     var it = dir.iterate();
 
-    while (try it.next()) |entry|{
+    while (try it.next()) |entry| {
         const stat = try std.posix.fstatat(dir.fd, entry.name, 0);
         if (stat.rdev == val) {
-            return try std.fs.path.join(alloc, &.{"/dev/dri", entry.name});
+            return try std.fs.path.join(alloc, &.{ "/dev/dri", entry.name });
         }
     }
 

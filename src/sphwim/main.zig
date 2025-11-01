@@ -120,7 +120,6 @@ pub fn main() !void {
     try std.posix.getrandom(std.mem.asBytes(&rng_seed));
     var rng = std.Random.DefaultPrng.init(rng_seed);
 
-
     var compositor_state = try CompositorState.init(&root_alloc, &scratch, rng.random(), preferred_size, render_backend);
     var memory_dumper = try PeriodicMemoryDumper.init(&root_alloc, &scratch);
 
