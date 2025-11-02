@@ -36,6 +36,11 @@ pub fn main() !void {
     defer model_renderer.deinit();
 
     while (!(try window.service())) {
+        // Only returns a position on frame()
+        if (window.pointerUpdate()) |pos| {
+            std.debug.print("Pointer at {any}\n", .{pos});
+        }
+
         if (window.wantsFrame()) {
             const window_size = try window.getSize();
             gl.glViewport(0, 0, window_size.width, window_size.height);

@@ -37,9 +37,9 @@ const Arg = struct {
                 .string => return "[:0]const u8",
                 .array => return "[]const u8",
                 .new_id => return "u32",
+                .fixed => return "wlio.WlFixed",
                 .object => return "u32",
                 .fd => return "void",
-                else => return null,
             }
         }
     };

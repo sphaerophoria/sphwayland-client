@@ -8,6 +8,7 @@ const BoundInterfaces = struct {
     xdg_wm_base: wlb.XdgWmBase,
     decoration_manager: wlb.ZxdgDecorationManagerV1,
     dmabuf: wlb.ZwpLinuxDmabufV1,
+    wl_seat: wlb.WlSeat,
 };
 
 fn bindInterfaces(client: *wlclient.Client(wlb)) !BoundInterfaces {
@@ -18,6 +19,7 @@ fn bindInterfaces(client: *wlclient.Client(wlb)) !BoundInterfaces {
     var xdg_wm_base: ?wlb.XdgWmBase = null;
     var decoration_manager: ?wlb.ZxdgDecorationManagerV1 = null;
     var dmabuf: ?wlb.ZwpLinuxDmabufV1 = null;
+    var wl_seat: ?wlb.WlSeat = null;
 
     while (try it.getAvailableEvent()) |event| {
         switch (event.event) {
@@ -37,6 +39,7 @@ fn bindInterfaces(client: *wlclient.Client(wlb)) !BoundInterfaces {
                             xdg_wm_base,
                             zxdg_decoration_manager_v1,
                             zwp_linux_dmabuf_v1,
+                            wl_seat,
                         };
 
                         const interface_name = std.meta.stringToEnum(DesiredInterfaces, g.interface) orelse {
@@ -49,6 +52,7 @@ fn bindInterfaces(client: *wlclient.Client(wlb)) !BoundInterfaces {
                             .xdg_wm_base => xdg_wm_base = try client.bind(wlb.XdgWmBase, g),
                             .zxdg_decoration_manager_v1 => decoration_manager = try client.bind(wlb.ZxdgDecorationManagerV1, g),
                             .zwp_linux_dmabuf_v1 => dmabuf = try client.bind(wlb.ZwpLinuxDmabufV1, g),
+                            .wl_seat => wl_seat = try client.bind(wlb.WlSeat, g),
                         }
                     },
                     .global_remove => {
@@ -65,6 +69,7 @@ fn bindInterfaces(client: *wlclient.Client(wlb)) !BoundInterfaces {
         .xdg_wm_base = xdg_wm_base orelse return error.NoXdgWmBase,
         .decoration_manager = decoration_manager orelse return error.DecorationManager,
         .dmabuf = dmabuf orelse return error.NoDmaBuf,
+        .wl_seat = wl_seat orelse return error.NoWlSeat,
     };
 }
 
@@ -118,13 +123,26 @@ pub const Window = struct {
     compositor: wlb.WlCompositor,
     xdg_wm_base: wlb.XdgWmBase,
     wl_surface: wlb.WlSurface,
+    wl_seat: wlb.WlSeat,
     xdg_surface: wlb.XdgSurface,
     dmabuf: wlb.ZwpLinuxDmabufV1,
     client: wlclient.Client(wlb),
     frame_callback: wlb.WlCallback,
+    wl_pointer: wlb.WlPointer,
 
     compositor_owned_buffers: std.AutoHashMap(u32, system.GbmContext.Buffer),
     wants_frame: bool = false,
+
+    input_events: struct {
+        pointer_pos: ?PointerPos = null,
+    } = .{},
+
+    pending_pointer: ?PointerPos = null,
+
+    const PointerPos = struct {
+        x: f32,
+        y: f32,
+    };
 
     pub fn init(alloc: std.mem.Allocator) !Window {
         var client = try wlclient.Client(wlb).init(alloc);
@@ -133,6 +151,11 @@ pub const Window = struct {
         const writer = client.writer();
 
         const bound_interfaces = try bindInterfaces(&client);
+
+        const wl_pointer = try client.newId(wlb.WlPointer);
+        try bound_interfaces.wl_seat.getPointer(writer, .{
+            .id = wl_pointer.id,
+        });
 
         const surface_feedback = try client.newId(wlb.ZwpLinuxDmabufFeedbackV1);
         try bound_interfaces.dmabuf.getDefaultFeedback(writer, .{
@@ -185,7 +208,9 @@ pub const Window = struct {
             .xdg_wm_base = bound_interfaces.xdg_wm_base,
             .dmabuf = bound_interfaces.dmabuf,
             .wl_surface = wl_surface,
+            .wl_seat = bound_interfaces.wl_seat,
             .xdg_surface = xdg_surface,
+            .wl_pointer = wl_pointer,
             .frame_callback = frame_callback,
             .client = client,
             .compositor_owned_buffers = .init(alloc),
@@ -201,6 +226,9 @@ pub const Window = struct {
 
     pub fn service(self: *Window) !bool {
         var it = self.client.eventIt();
+
+        self.clearInputEvents();
+
         while (try it.getAvailableEvent()) |event| {
             if (try self.handleEvent(event)) {
                 return true;
@@ -375,8 +403,28 @@ pub const Window = struct {
                     },
                 }
             },
+            .wl_pointer => |parsed| switch (parsed) {
+                .frame => {
+                    self.input_events.pointer_pos = self.pending_pointer;
+                },
+                .motion => |params| {
+                    self.pending_pointer = .{
+                        .x = params.surface_x.tof32(),
+                        .y = params.surface_y.tof32(),
+                    };
+                },
+                else => wlclient.logUnusedEvent(event.event),
+            },
             else => wlclient.logUnusedEvent(event.event),
         }
         return false;
+    }
+
+    pub fn pointerUpdate(self: Window) ?PointerPos {
+        return self.input_events.pointer_pos;
+    }
+
+    fn clearInputEvents(self: *Window) void {
+        self.input_events.pointer_pos = null;
     }
 };

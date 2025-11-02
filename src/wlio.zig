@@ -3,6 +3,14 @@ const builtin = @import("builtin");
 
 pub const HeaderLE = packed struct { id: u32, op: u16, size: u16 };
 
+pub const WlFixed = packed struct(u32) {
+    integer: i32,
+
+    pub fn tof32(self: WlFixed) f32 {
+        return @as(f32, @floatFromInt(self.integer)) / 256;
+    }
+};
+
 pub fn writeWlMessage(writer: *std.io.Writer, elem: anytype, id: u32) !void {
     var size: usize = @sizeOf(HeaderLE);
     inline for (std.meta.fields(@TypeOf(elem))) |field| {
@@ -86,6 +94,9 @@ pub fn parseDataResponse(comptime T: type, data: []const u8) !T {
             },
             []const u8 => {
                 @field(ret, field.name) = try it.getArray();
+            },
+            WlFixed => {
+                @field(ret, field.name) = @bitCast(try it.getU32());
             },
             void => {},
             else => @compileError("Unimplemented parser for " ++ field.name),
