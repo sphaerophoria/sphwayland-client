@@ -137,6 +137,10 @@ pub fn InterfaceRegistry(comptime Bindings: type) type {
             };
         }
 
+        pub fn remove(self: *Self, object_id: u32) void {
+            _ = self.elems.remove(object_id);
+        }
+
         fn resolveInterfaceType(comptime T: type) Bindings.WaylandInterfaceType {
             inline for (std.meta.fields(Bindings.WaylandIncomingMessage)) |field| {
                 if (field.type == T.IncomingMessage) {

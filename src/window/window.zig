@@ -348,7 +348,7 @@ pub const Window = struct {
                             try self.wl_surface.frame(self.client.writer(), .{ .callback = self.frame_callback.id });
                             try self.wl_surface.commit(self.client.writer(), .{});
                         } else {
-                            std.log.warn("Deletion of object {d} is not handled", .{req.id});
+                            self.client.interfaces.remove(req.id);
                         }
                     },
                 }
