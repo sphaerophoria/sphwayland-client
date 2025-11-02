@@ -39,7 +39,6 @@ const Builder = struct {
         return self.b.dependency("sphtud", .{
             .with_gl = true,
             .gl_extensions = gl_extensions,
-
         }).module("sphtud");
     }
 
@@ -72,15 +71,12 @@ const Builder = struct {
             .wlgen = wlgen,
         };
 
-        return bindings_generator.generate(
-            "wayland.zig",
-            "client",
-            &.{
-                self.b.path("res/wayland.xml"),
-                self.b.path("res/xdg-shell.xml"),
-                self.b.path("res/xdg-decoration-unstable-v1.xml"),
-                self.b.path("res/linux-dmabuf-v1.xml"),
-            });
+        return bindings_generator.generate("wayland.zig", "client", &.{
+            self.b.path("res/wayland.xml"),
+            self.b.path("res/xdg-shell.xml"),
+            self.b.path("res/xdg-decoration-unstable-v1.xml"),
+            self.b.path("res/linux-dmabuf-v1.xml"),
+        });
     }
 
     pub fn makeServerBindings(self: Builder, wlgen: *std.Build.Step.Compile, wlio: *std.Build.Module) *std.Build.Module {
@@ -92,15 +88,12 @@ const Builder = struct {
             .wlgen = wlgen,
         };
 
-        return bindings_generator.generate(
-            "wayland.zig",
-            "server",
-            &.{
-                self.b.path("res/wayland.xml"),
-                self.b.path("res/xdg-shell.xml"),
-                self.b.path("res/xdg-decoration-unstable-v1.xml"),
-                self.b.path("res/linux-dmabuf-v1.xml"),
-            });
+        return bindings_generator.generate("wayland.zig", "server", &.{
+            self.b.path("res/wayland.xml"),
+            self.b.path("res/xdg-shell.xml"),
+            self.b.path("res/xdg-decoration-unstable-v1.xml"),
+            self.b.path("res/linux-dmabuf-v1.xml"),
+        });
     }
 
     pub fn makeWlCmsg(self: Builder) *std.Build.Module {
@@ -141,12 +134,11 @@ const Builder = struct {
 
     pub fn makeSystemGlBindings(self: Builder) !*std.Build.Module {
         const window_translate_c_bindings = try self.translateCFixed("src/window/c_bindings.h");
-        const module =  window_translate_c_bindings.createModule();
+        const module = window_translate_c_bindings.createModule();
         return module;
-
     }
 
-    pub fn makeWindow(self: Builder, wlio: *std.Build.Module, bindings: *std.Build.Module, wlclient: *std.Build.Module, gl_bindings: *std.Build.Module ) !*std.Build.Module {
+    pub fn makeWindow(self: Builder, wlio: *std.Build.Module, bindings: *std.Build.Module, wlclient: *std.Build.Module, gl_bindings: *std.Build.Module) !*std.Build.Module {
         const sphwindow = self.b.addModule("sphwindow", .{
             .root_source_file = self.b.path("src/window/window.zig"),
             .target = self.target,
@@ -175,7 +167,7 @@ const Builder = struct {
         const exe = self.b.addExecutable(.{
             .name = "sphwayland-client",
             .root_module = self.b.createModule(.{
-                .root_source_file =  self.b.path("src/example/main.zig"),
+                .root_source_file = self.b.path("src/example/main.zig"),
                 .target = self.target,
                 .optimize = self.optimize,
             }),
@@ -205,7 +197,7 @@ const Builder = struct {
         const exe = self.b.addExecutable(.{
             .name = "sphwim",
             .root_module = self.b.createModule(.{
-                .root_source_file =  self.b.path("src/sphwim/main.zig"),
+                .root_source_file = self.b.path("src/sphwim/main.zig"),
                 .target = self.target,
                 .optimize = self.optimize,
             }),
@@ -242,7 +234,7 @@ const Builder = struct {
 
         var include_it = try process_include_paths.IncludeIter.init(self.b.allocator);
         while (include_it.next()) |p| {
-            window_translate_c_bindings.addSystemIncludePath(std.Build.LazyPath { .cwd_relative = p });
+            window_translate_c_bindings.addSystemIncludePath(std.Build.LazyPath{ .cwd_relative = p });
         }
         return window_translate_c_bindings;
     }
@@ -253,7 +245,7 @@ pub fn build(b: *std.Build) !void {
     const optimize = b.standardOptimizeOption(.{});
     const check = b.option(bool, "check", "") orelse false;
 
-    const builder = Builder {
+    const builder = Builder{
         .target = target,
         .optimize = optimize,
         .b = b,
