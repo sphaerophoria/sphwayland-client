@@ -220,7 +220,7 @@ fn pageFlipHandler(fd: c_int, frame: c_uint, sec: c_uint, usec: c_uint, data: ?*
 
 fn getFirstConnectedConnector(f: std.fs.File, resources: *c.drmModeRes) ?*c.drmModeConnector {
     for (resources.connectors[0..@intCast(resources.count_connectors)]) |connector_id| {
-        const connector: *c.drmModeConnector = c.drmModeGetConnectorCurrent(f.handle, connector_id) orelse continue;
+        const connector: *c.drmModeConnector = c.drmModeGetConnector(f.handle, connector_id) orelse continue;
 
         if (connector.connection == c.DRM_MODE_CONNECTED) {
             return connector;
