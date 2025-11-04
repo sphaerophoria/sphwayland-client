@@ -96,7 +96,7 @@ fn resolveDriHandleFromDevt(alloc: std.mem.Allocator, val_opt: ?u64) ![]const u8
     return default_card;
 }
 
-fn registerForDmaBufFeedback(alloc: std.mem.Allocator, client: *wlclient.Client(wlb)) ![]const u8 {
+fn registerForDmaBufFeedback(client: *wlclient.Client(wlb)) !?u64 {
     var it = client.eventIt();
     try it.retrieveEvents();
 
@@ -113,13 +113,98 @@ fn registerForDmaBufFeedback(alloc: std.mem.Allocator, client: *wlclient.Client(
         else => wlclient.logUnusedEvent(event.event),
     };
 
-    return try resolveDriHandleFromDevt(alloc, main_device_dev_t);
+    return main_device_dev_t;
 }
 
-pub const Window = struct {
+pub const DefaultGlContext = struct {
     egl_ctx: system.EglContext,
     gbm_ctx: system.GbmContext,
+    compositor_owned_buffers: std.AutoHashMap(u32, system.GbmContext.Buffer),
 
+    pub fn init(alloc: std.mem.Allocator, initial_width: u32, initial_height: u32, device: []const u8) !DefaultGlContext {
+        var gbm_ctx = try system.GbmContext.init(initial_width, initial_height, device);
+        errdefer gbm_ctx.deinit();
+
+        const egl_ctx = try system.EglContext.init(alloc, gbm_ctx);
+
+        return .{
+            .egl_ctx = egl_ctx,
+            .gbm_ctx = gbm_ctx,
+            .compositor_owned_buffers = .init(alloc),
+        };
+    }
+
+    pub fn deinit(self: *DefaultGlContext) void {
+        self.egl_ctx.deinit();
+        self.gbm_ctx.deinit();
+        self.compositor_owned_buffers.deinit();
+    }
+
+    pub const Size = struct {
+        width: i32,
+        height: i32,
+    };
+
+    pub fn getSize(self: *DefaultGlContext) !Size {
+        return .{
+            .width = try self.egl_ctx.getWidth(),
+            .height = try self.egl_ctx.getHeight(),
+        };
+    }
+
+    pub fn swapBuffers(self: *DefaultGlContext, window: *Window) !void {
+        try self.egl_ctx.swapBuffers();
+
+        const front_buf = try self.gbm_ctx.lockFront();
+
+        // front buffer is owned by us until it is committed to a
+        // wl_surface, then it is owned by the compositor
+        errdefer self.gbm_ctx.unlock(front_buf);
+
+        const buffer = try RenderBuffer.fromGbm(front_buf);
+        defer std.posix.close(buffer.fd);
+
+        const wl_buf_id = try window.swapBuffers(buffer);
+        try self.compositor_owned_buffers.put(wl_buf_id, front_buf);
+    }
+
+    pub fn notifyGlBufferRelease(self: *DefaultGlContext, buf_id: u32) void {
+        const gbm_handle = self.compositor_owned_buffers.fetchRemove(buf_id) orelse {
+            std.log.err("Got release event for unknown buffer", .{});
+            return;
+        };
+
+        self.gbm_ctx.unlock(gbm_handle.value);
+    }
+};
+
+const NullGlCtx = struct {
+    pub fn notifyGlBufferRelease(_: NullGlCtx, _: u32) void {}
+};
+
+pub const RenderBuffer = struct {
+    fd: c_int,
+    offset: u32,
+    stride: u32,
+    modifier: u64,
+    width: u32,
+    height: u32,
+    format: u32,
+
+    fn fromGbm(gbm_buf: system.GbmContext.Buffer) !RenderBuffer {
+        return .{
+            .fd = gbm_buf.fd(),
+            .offset = gbm_buf.offset(),
+            .stride = gbm_buf.stride(),
+            .modifier = gbm_buf.modifier(),
+            .width = gbm_buf.width(),
+            .height = gbm_buf.height(),
+            .format = gbm_buf.format(),
+        };
+    }
+};
+
+pub const Window = struct {
     compositor: wlb.WlCompositor,
     xdg_wm_base: wlb.XdgWmBase,
     wl_surface: wlb.WlSurface,
@@ -130,7 +215,6 @@ pub const Window = struct {
     frame_callback: wlb.WlCallback,
     wl_pointer: wlb.WlPointer,
 
-    compositor_owned_buffers: std.AutoHashMap(u32, system.GbmContext.Buffer),
     wants_frame: bool = false,
 
     input_events: struct {
@@ -138,7 +222,15 @@ pub const Window = struct {
     } = .{},
 
     pending_pointer: ?PointerPos = null,
+    preferred_gpu: ?u64,
 
+    const FormatTableItem = packed struct {
+        format: u32,
+        padding: u32,
+        modifier: u64,
+    };
+
+    const FormatModifierPair = struct { format: u32, modifier: u64 };
     const PointerPos = struct {
         x: f32,
         y: f32,
@@ -162,15 +254,7 @@ pub const Window = struct {
             .id = surface_feedback.id,
         });
 
-        var desired_gpu_device_buf: [4096]u8 = undefined;
-        var desired_gpu_alloc = std.heap.FixedBufferAllocator.init(&desired_gpu_device_buf);
-        const desired_gpu_device = try registerForDmaBufFeedback(desired_gpu_alloc.allocator(), &client);
-
-        var gbm_context = try system.GbmContext.init(640, 480, desired_gpu_device);
-        errdefer gbm_context.deinit();
-
-        var egl_context = try system.EglContext.init(alloc, gbm_context);
-        errdefer egl_context.deinit();
+        const preferred_gpu = try registerForDmaBufFeedback(&client);
 
         const wl_surface = try client.newId(wlb.WlSurface);
         try bound_interfaces.compositor.createSurface(writer, .{
@@ -201,9 +285,7 @@ pub const Window = struct {
             .callback = frame_callback.id,
         });
 
-        return .{
-            .egl_ctx = egl_context,
-            .gbm_ctx = gbm_context,
+        var ret = Window{
             .compositor = bound_interfaces.compositor,
             .xdg_wm_base = bound_interfaces.xdg_wm_base,
             .dmabuf = bound_interfaces.dmabuf,
@@ -213,45 +295,46 @@ pub const Window = struct {
             .wl_pointer = wl_pointer,
             .frame_callback = frame_callback,
             .client = client,
-            .compositor_owned_buffers = .init(alloc),
+            .preferred_gpu = preferred_gpu,
         };
+        errdefer ret.deinit();
+
+        try ret.wait();
+        // On init, we should not have any outstanding gl buffers, so no
+        // state to manage
+        if (try ret.service(NullGlCtx{})) return error.Shutdown;
+
+        return ret;
     }
 
     pub fn deinit(self: *Window) void {
-        self.compositor_owned_buffers.deinit();
-        self.egl_ctx.deinit();
-        self.gbm_ctx.deinit();
         self.client.deinit();
     }
 
-    pub fn service(self: *Window) !bool {
+    // By default users will use DefaultGlCtx above, but some users of this
+    // library want to manage their own OpenGL context (e.g. sphwim within this
+    // repo). Allow any type that has notifyGlBufferRelease to be used to
+    // support this case
+    pub fn service(self: *Window, gl_ctx: anytype) !bool {
         var it = self.client.eventIt();
 
         self.clearInputEvents();
 
         while (try it.getAvailableEvent()) |event| {
-            if (try self.handleEvent(event)) {
+            if (try self.handleEvent(event, gl_ctx)) {
                 return true;
             }
         }
         return false;
     }
 
+    pub fn getPreferredGpu(self: Window, alloc: std.mem.Allocator) ![]const u8 {
+        return resolveDriHandleFromDevt(alloc, self.preferred_gpu);
+    }
+
     pub fn wait(self: *Window) !void {
         var it = self.client.eventIt();
         try it.wait();
-    }
-
-    const Size = struct {
-        width: i32,
-        height: i32,
-    };
-
-    pub fn getSize(self: *Window) !Size {
-        return .{
-            .width = try self.egl_ctx.getWidth(),
-            .height = try self.egl_ctx.getHeight(),
-        };
     }
 
     pub fn wantsFrame(self: *Window) bool {
@@ -260,55 +343,47 @@ pub const Window = struct {
 
     fn addBufferObjectToBufParams(
         self: *Window,
-        alloc: std.mem.Allocator,
-        front_buf: system.GbmContext.Buffer,
+        front_buf: RenderBuffer,
         params: wlb.ZwpLinuxBufferParamsV1,
     ) !void {
-        var add_writer = std.Io.Writer.Allocating.init(alloc);
-        defer add_writer.deinit();
+        // 5 uints, a fd, and a header should be ~36 bytes? Maybe a little
+        // more. 128 is plenty
+        var writer_buf: [128]u8 = undefined;
+        var add_writer = std.Io.Writer.fixed(&writer_buf);
 
-        const modifier = front_buf.modifier();
-        try params.add(&add_writer.writer, .{
+        const modifier = front_buf.modifier;
+        try params.add(&add_writer, .{
             // Out of band
             .fd = {},
             .plane_idx = 0, // assumed single plane
-            .offset = front_buf.offset(),
-            .stride = front_buf.stride(),
+            .offset = front_buf.offset,
+            .stride = front_buf.stride,
             .modifier_hi = @truncate(modifier >> 32),
             .modifier_lo = @truncate(modifier),
         });
 
-        const buf_fd = front_buf.fd();
+        const buf_fd = front_buf.fd;
         try wlclient.sendMessageWithFdAttachment(
             self.client.stream,
-            add_writer.written(),
+            add_writer.buffered(),
             @bitCast(buf_fd),
         );
-        std.posix.close(buf_fd);
     }
 
-    pub fn swapBuffers(self: *Window, alloc: std.mem.Allocator) !void {
-        try self.egl_ctx.swapBuffers();
-
-        const front_buf = try self.gbm_ctx.lockFront();
-
-        // front buffer is owned by us until it is committed to a
-        // wl_surface, then it is owned by the compositor
-        errdefer self.gbm_ctx.unlock(front_buf);
-
+    pub fn swapBuffers(self: *Window, front_buf: RenderBuffer) !u32 {
         const params = try self.client.newId(wlb.ZwpLinuxBufferParamsV1);
         try self.dmabuf.createParams(self.client.writer(), .{
             .params_id = params.id,
         });
 
-        try self.addBufferObjectToBufParams(alloc, front_buf, params);
+        try self.addBufferObjectToBufParams(front_buf, params);
 
         const wl_buf = try self.client.newId(wlb.WlBuffer);
         try params.createImmed(self.client.writer(), .{
             .buffer_id = wl_buf.id,
-            .width = std.math.cast(i32, front_buf.width()) orelse return error.InvalidWidth,
-            .height = std.math.cast(i32, front_buf.height()) orelse return error.InvalidHeight,
-            .format = front_buf.format(),
+            .width = std.math.cast(i32, front_buf.width) orelse return error.InvalidWidth,
+            .height = std.math.cast(i32, front_buf.height) orelse return error.InvalidHeight,
+            .format = front_buf.format,
             .flags = 0,
         });
 
@@ -325,9 +400,6 @@ pub const Window = struct {
             .height = std.math.maxInt(i32),
         });
 
-        try self.compositor_owned_buffers.put(wl_buf.id, front_buf);
-        errdefer _ = self.compositor_owned_buffers.remove(wl_buf.id);
-
         try self.wl_surface.commit(self.client.writer(), .{});
 
         // Commit has to be the last failable call in this scope, or a bunch of
@@ -336,9 +408,10 @@ pub const Window = struct {
         errdefer comptime unreachable;
 
         self.wants_frame = false;
+        return wl_buf.id;
     }
 
-    fn handleEvent(self: *Window, event: wlclient.Event(wlb)) !bool {
+    fn handleEvent(self: *Window, event: wlclient.Event(wlb), gl_ctx: anytype) !bool {
         switch (event.event) {
             .wl_display => |parsed| {
                 switch (parsed) {
@@ -383,15 +456,11 @@ pub const Window = struct {
             },
             .wl_buffer => |parsed| {
                 switch (parsed) {
-                    .release => blk: {
-                        const gbm_handle = self.compositor_owned_buffers.get(event.object_id) orelse {
-                            std.log.err("Got release event for unknown buffer", .{});
-                            break :blk;
-                        };
-                        self.gbm_ctx.unlock(gbm_handle);
-
+                    .release => {
                         const iface = wlb.WlBuffer{ .id = event.object_id };
                         try iface.destroy(self.client.writer(), .{});
+
+                        gl_ctx.notifyGlBufferRelease(event.object_id);
                     },
                 }
             },

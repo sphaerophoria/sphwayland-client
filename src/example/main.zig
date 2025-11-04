@@ -30,19 +30,27 @@ pub fn main() !void {
     var window = try sphwindow.Window.init(alloc);
     defer window.deinit();
 
+    var gl_ctx = blk: {
+        const preferred_gpu = try window.getPreferredGpu(alloc);
+        defer alloc.free(preferred_gpu);
+
+        break :blk try sphwindow.DefaultGlContext.init(alloc, 640, 480, preferred_gpu);
+    };
+    defer gl_ctx.deinit();
+
     initializeGlParams();
 
     var model_renderer = try ModelRenderer.init(alloc);
     defer model_renderer.deinit();
 
-    while (!(try window.service())) {
+    while (!(try window.service(&gl_ctx))) {
         // Only returns a position on frame()
         if (window.pointerUpdate()) |pos| {
             std.debug.print("Pointer at {any}\n", .{pos});
         }
 
         if (window.wantsFrame()) {
-            const window_size = try window.getSize();
+            const window_size = try gl_ctx.getSize();
             gl.glViewport(0, 0, window_size.width, window_size.height);
 
             gl.glClearColor(0.4, 0.4, 0.4, 1.0);
@@ -52,7 +60,7 @@ pub fn main() !void {
             model_renderer.rotate(0.01, 0.001);
             model_renderer.render(1.0);
 
-            try window.swapBuffers(alloc);
+            try gl_ctx.swapBuffers(&window);
         }
 
         try window.wait();
