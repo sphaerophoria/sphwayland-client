@@ -6,7 +6,7 @@ const Bindings = @import("wayland_bindings");
 const CompositorState = @import("CompositorState.zig");
 const system_gl = @import("system_gl.zig");
 const gl = sphtud.render.gl;
-const input = @import("input.zig");
+const backend = @import("backend.zig");
 
 pub const std_options = std.Options{
     .log_level = .warn,
@@ -103,13 +103,15 @@ pub fn main() !void {
     var scratch_buf: [1 * 1024 * 1024]u8 = undefined;
     var scratch = sphtud.alloc.BufAllocator.init(&scratch_buf);
 
-    const render_backend = try rendering.initRenderBackend(root_alloc.arena());
+    var system_running: bool = true;
+
+    const render_backend = try backend.initBackend(root_alloc.general(), &system_running);
     defer render_backend.deinit();
 
     var gbm_context = try system_gl.GbmContext.init(render_backend.initial_res.width, render_backend.initial_res.height, render_backend.preferred_gpu);
     errdefer gbm_context.deinit();
 
-    var egl_context = try system_gl.EglContext.init(root_alloc.arena(), gbm_context);
+    var egl_context = try system_gl.EglContext.init(scratch.linear(), gbm_context);
     errdefer egl_context.deinit();
 
     try sphtud.render.initGl(system_gl.getProcAddress);
@@ -128,19 +130,12 @@ pub fn main() !void {
 
     const image_renderer = try sphtud.render.xyuvt_program.ImageRenderer.init(&gl_alloc, .rgba);
 
-    const input_backend = try input.initializeBackend(root_alloc.arena());
-    var input_handler = input.InputHandler{
-        .backend = input_backend,
-        .compositor_state = &compositor_state,
-    };
-
     var renderer = try rendering.Renderer.init(
         &root_alloc,
         scratch.linear(),
         &gl_alloc,
         &egl_context,
         &gbm_context,
-        render_backend,
         &compositor_state,
         image_renderer,
     );
@@ -155,16 +150,17 @@ pub fn main() !void {
         scratch.linear(),
         rng.random(),
         &compositor_state,
-        render_backend,
         &gbm_context,
         &egl_context,
     );
     try loop.register(server.handler());
     try loop.register(memory_dumper.handler());
-    try loop.register(input_handler.handler());
-    try loop.register(try render_backend.makeHandler(root_alloc.arena(), &renderer));
+    const handlers = try render_backend.makeHandlers(root_alloc.arena(), &renderer, &compositor_state);
+    for (handlers) |handler| {
+        try loop.register(handler);
+    }
 
-    while (true) {
+    while (system_running) {
         scratch.reset();
         try loop.wait(scratch.linear());
     }

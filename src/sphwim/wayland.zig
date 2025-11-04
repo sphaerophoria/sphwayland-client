@@ -44,7 +44,6 @@ const ServerCtx = struct {
     scratch: sphtud.alloc.LinearAllocator,
     server_alloc: *sphtud.alloc.Sphalloc,
     compositor_state: *CompositorState,
-    render_backend: rendering.RenderBackend,
     rand: std.Random,
     gbm_context: *const system_gl.GbmContext,
     format_table: FormatTable,
@@ -69,7 +68,6 @@ pub fn makeWaylandServer(
     scratch: sphtud.alloc.LinearAllocator,
     rand: std.Random,
     compositor_state: *CompositorState,
-    render_backend: rendering.RenderBackend,
     gbm_context: *const system_gl.GbmContext,
     egl_context: *const system_gl.EglContext,
 ) !sphtud.event.net.Server(sphtud.event.LoopSphalloc, ServerCtx) {
@@ -104,7 +102,6 @@ pub fn makeWaylandServer(
         .scratch = scratch,
         .rand = rand,
         .compositor_state = compositor_state,
-        .render_backend = render_backend,
         .gbm_context = gbm_context,
         .format_table = try FormatTable.init(scratch, egl_context),
     });

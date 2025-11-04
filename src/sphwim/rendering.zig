@@ -1,7 +1,5 @@
 const std = @import("std");
 const sphtud = @import("sphtud");
-const DrmRenderBackend = @import("rendering/DrmRenderBackend.zig");
-const NullRenderBackend = @import("rendering/NullRenderBackend.zig");
 const wayland = @import("wayland.zig");
 const FdPool = @import("FdPool.zig");
 const CompositorState = @import("CompositorState.zig");
@@ -44,37 +42,6 @@ pub const Resolution = struct {
     height: u32,
 };
 
-pub const RenderBackend = struct {
-    preferred_gpu: []const u8,
-    initial_res: Resolution,
-    ctx: ?*anyopaque,
-    vtable: *const VTable,
-
-    const VTable = struct {
-        makeHandler: *const fn (ctx: ?*anyopaque, alloc: std.mem.Allocator, renderer: *Renderer) anyerror!sphtud.event.LoopSphalloc.Handler,
-        deinit: *const fn (ctx: ?*anyopaque) void,
-    };
-
-    pub fn makeHandler(self: RenderBackend, alloc: std.mem.Allocator, renderer: *Renderer) !sphtud.event.LoopSphalloc.Handler {
-        return self.vtable.makeHandler(self.ctx, alloc, renderer);
-    }
-
-    pub fn deinit(self: RenderBackend) void {
-        return self.vtable.deinit(self.ctx);
-    }
-};
-
-pub fn initRenderBackend(alloc: std.mem.Allocator) !RenderBackend {
-    if (DrmRenderBackend.init(alloc)) |backend| {
-        return backend;
-    } else |e| {
-        logger.info("Failed to init drm render backend: {t}", .{e});
-    }
-
-    logger.warn("Failed to init render backend, using null backend", .{});
-    return try NullRenderBackend.init(alloc);
-}
-
 fn asf32(in: anytype) f32 {
     return @floatFromInt(in);
 }
@@ -84,7 +51,6 @@ pub const Renderer = struct {
 
     egl_ctx: *system_gl.EglContext,
     gbm_ctx: *system_gl.GbmContext,
-    render_backend: RenderBackend,
 
     compositor_state: *CompositorState,
     image_renderer: sphtud.render.xyuvt_program.ImageRenderer,
@@ -105,7 +71,6 @@ pub const Renderer = struct {
         gl_alloc: *sphtud.render.GlAlloc,
         egl_ctx: *system_gl.EglContext,
         gbm_ctx: *system_gl.GbmContext,
-        render_backend: RenderBackend,
         compositor_state: *CompositorState,
         image_renderer: sphtud.render.xyuvt_program.ImageRenderer,
     ) !Renderer {
@@ -121,7 +86,6 @@ pub const Renderer = struct {
 
         return .{
             .frame_gl_alloc = try gl_alloc.makeSubAlloc(alloc),
-            .render_backend = render_backend,
             .last_render_time = try std.time.Instant.now(),
             .compositor_state = compositor_state,
             .egl_ctx = egl_ctx,

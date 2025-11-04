@@ -187,7 +187,7 @@ const Builder = struct {
         return exe;
     }
 
-    pub fn makeWm(self: Builder, wlio: *std.Build.Module, bindings: *std.Build.Module, sphtud: *std.Build.Module, wl_cmsg: *std.Build.Module) !*std.Build.Step.Compile {
+    pub fn makeWm(self: Builder, wlio: *std.Build.Module, bindings: *std.Build.Module, sphtud: *std.Build.Module, wl_cmsg: *std.Build.Module, sphwindow: *std.Build.Module) !*std.Build.Step.Compile {
         const gl_bindings_translate_c = try self.translateCFixed("src/sphwim/gl_system_bindings.h");
         const gl_bindings = gl_bindings_translate_c.createModule();
 
@@ -209,6 +209,7 @@ const Builder = struct {
         exe.root_module.addImport("wl_cmsg", wl_cmsg);
         exe.root_module.addImport("gl_system_bindings", gl_bindings);
         exe.root_module.addImport("input", input_bindings);
+        exe.root_module.addImport("sphwindow", sphwindow);
 
         exe.linkSystemLibrary("gbm");
         exe.linkSystemLibrary("EGL");
@@ -262,7 +263,7 @@ pub fn build(b: *std.Build) !void {
 
     const sphtud = builder.importSphtud();
     const server_bindings = builder.makeServerBindings(wlgen, wlio_mod);
-    const wm = try builder.makeWm(wlio_mod, server_bindings, sphtud, wl_cmsg);
+    const wm = try builder.makeWm(wlio_mod, server_bindings, sphtud, wl_cmsg, sphwindow);
 
     if (check) {
         b.getInstallStep().dependOn(&example.step);

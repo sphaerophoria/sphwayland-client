@@ -328,6 +328,10 @@ pub const Window = struct {
         return false;
     }
 
+    pub fn getFd(self: Window) std.posix.fd_t {
+        return self.client.stream.handle;
+    }
+
     pub fn getPreferredGpu(self: Window, alloc: std.mem.Allocator) ![]const u8 {
         return resolveDriHandleFromDevt(alloc, self.preferred_gpu);
     }

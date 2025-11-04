@@ -2,12 +2,13 @@ const std = @import("std");
 const sphtud = @import("sphtud");
 const CompositorState = @import("../CompositorState.zig");
 const rendering = @import("../rendering.zig");
+const backend = @import("../backend.zig");
 
 const NullRenderBackend = @This();
 
 fd: std.posix.fd_t,
 
-pub fn init(alloc: std.mem.Allocator) !rendering.RenderBackend {
+pub fn init(alloc: std.mem.Allocator) !backend.Backend {
     const ctx = try alloc.create(NullRenderBackend);
     ctx.* = .{
         .fd = try std.posix.timerfd_create(.MONOTONIC, .{}),
@@ -29,7 +30,7 @@ pub fn init(alloc: std.mem.Allocator) !rendering.RenderBackend {
         .initial_res = .{ .width = 640, .height = 480 },
         .ctx = ctx,
         .vtable = &.{
-            .makeHandler = makeHandler,
+            .makeHandlers = makeHandlers,
             .deinit = deinit,
         },
     };
@@ -68,7 +69,7 @@ const Handler = struct {
     fn close(_: ?*anyopaque) void {}
 };
 
-fn makeHandler(ctx: ?*anyopaque, alloc: std.mem.Allocator, renderer: *rendering.Renderer) anyerror!sphtud.event.LoopSphalloc.Handler {
+fn makeHandlers(ctx: ?*anyopaque, alloc: std.mem.Allocator, renderer: *rendering.Renderer, _: *CompositorState) anyerror![]sphtud.event.LoopSphalloc.Handler {
     const self: *NullRenderBackend = @ptrCast(@alignCast(ctx));
 
     const handler_ctx = try alloc.create(Handler);
@@ -77,7 +78,8 @@ fn makeHandler(ctx: ?*anyopaque, alloc: std.mem.Allocator, renderer: *rendering.
         .renderer = renderer,
     };
 
-    return .{
+    const handlers = try alloc.alloc(sphtud.event.LoopSphalloc.Handler, 1);
+    handlers[0] = .{
         .ptr = handler_ctx,
         .vtable = &.{
             .poll = Handler.poll,
@@ -89,4 +91,6 @@ fn makeHandler(ctx: ?*anyopaque, alloc: std.mem.Allocator, renderer: *rendering.
             .write = false,
         },
     };
+
+    return handlers;
 }

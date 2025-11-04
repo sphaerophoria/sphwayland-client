@@ -16,8 +16,9 @@ connector_id: u32,
 preferred_mode: c.drmModeModeInfo,
 crtc_set: bool = false,
 outstanding_buffer: ?system_gl.GbmContext.Buffer,
+preferred_gpu: []const u8,
 
-pub fn init(alloc: std.mem.Allocator) !rendering.RenderBackend {
+pub fn init(alloc: std.mem.Allocator) !Drm {
     const best_gpu = try selectBestGPU(alloc);
     std.log.info("Rendering on GPU {s}", .{best_gpu});
     const f = try std.fs.openFileAbsolute(best_gpu, .{
@@ -46,31 +47,17 @@ pub fn init(alloc: std.mem.Allocator) !rendering.RenderBackend {
         error.BlankScreen,
     );
 
-    const ret = try alloc.create(Drm);
-    ret.* = .{
+    return .{
         .crtc_id = crtc.crtc_id,
         .dri_file = f,
         .connector_id = connector.connector_id,
         .preferred_mode = preferred_mode.*,
         .outstanding_buffer = null,
-    };
-
-    return .{
         .preferred_gpu = best_gpu,
-        .initial_res = .{
-            .width = preferred_mode.hdisplay,
-            .height = preferred_mode.vdisplay,
-        },
-        .ctx = ret,
-        .vtable = &.{
-            .makeHandler = makeHandler,
-            .deinit = deinit,
-        },
     };
 }
 
-pub fn deinit(ctx: ?*anyopaque) void {
-    const self: *Drm = @ptrCast(@alignCast(ctx));
+pub fn deinit(self: *Drm) void {
     self.dri_file.close();
 }
 
@@ -153,9 +140,7 @@ const Handler = struct {
     }
 };
 
-fn makeHandler(ctx: ?*anyopaque, alloc: std.mem.Allocator, renderer: *rendering.Renderer) !sphtud.event.LoopSphalloc.Handler {
-    const self: *Drm = @ptrCast(@alignCast(ctx));
-
+pub fn makeHandler(self: *Drm, alloc: std.mem.Allocator, renderer: *rendering.Renderer) !sphtud.event.LoopSphalloc.Handler {
     const handler_ctx = try alloc.create(Handler);
     handler_ctx.* = .{
         .parent = self,

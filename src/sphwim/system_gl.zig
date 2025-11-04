@@ -51,6 +51,8 @@ pub const GbmContext = struct {
         init_height: u32,
         device_path: []const u8,
     ) !GbmContext {
+        std.log.debug("Initializing GL context with GPU {s}\n", .{device_path});
+
         const f = try std.fs.openFileAbsolute(device_path, .{ .mode = .read_write });
         errdefer f.close();
 
@@ -105,7 +107,10 @@ pub const EglContext = struct {
     eglQueryDmaBufFormatsEXT: c.PFNEGLQUERYDMABUFFORMATSEXTPROC,
     eglQueryDmaBufModifiersEXT: c.PFNEGLQUERYDMABUFMODIFIERSEXTPROC,
 
-    pub fn init(alloc: std.mem.Allocator, gbm_context: GbmContext) !EglContext {
+    pub fn init(scratch: sphtud.alloc.LinearAllocator, gbm_context: GbmContext) !EglContext {
+        const cp = scratch.checkpoint();
+        defer scratch.restore(cp);
+
         const display = c.eglGetDisplay(gbm_context.device);
         if (display == c.EGL_NO_DISPLAY) {
             return error.NoDisplay;
@@ -133,8 +138,7 @@ pub const EglContext = struct {
         }
 
         const num_configs_u = std.math.cast(usize, num_configs) orelse return error.InvalidNumConfigs;
-        const available_configs = try alloc.alloc(c.EGLConfig, num_configs_u);
-        defer alloc.free(available_configs);
+        const available_configs = try scratch.allocator().alloc(c.EGLConfig, num_configs_u);
 
         if (c.eglChooseConfig(display, &attribs, available_configs.ptr, num_configs, &num_configs) != c.EGL_TRUE) {
             return error.ChooseConfig;
