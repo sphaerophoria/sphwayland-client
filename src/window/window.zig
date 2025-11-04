@@ -100,26 +100,6 @@ fn resolveDriHandleFromDevt(alloc: std.mem.Allocator, val_opt: ?u64) ![]const u8
     return default_card;
 }
 
-fn registerForDmaBufFeedback(client: *wlclient.Client(wlb)) !?u64 {
-    var it = client.eventIt();
-    try it.retrieveEvents();
-
-    var main_device_dev_t: ?u64 = null;
-
-    while (try it.getAvailableEvent()) |event| switch (event.event) {
-        .zwp_linux_dmabuf_feedback_v1 => |feedback| switch (feedback) {
-            .main_device => |device| {
-                std.debug.print("Got main device {any}\n", .{device.device});
-                main_device_dev_t = std.mem.bytesToValue(u64, device.device);
-            },
-            else => wlclient.logUnusedEvent(event.event),
-        },
-        else => wlclient.logUnusedEvent(event.event),
-    };
-
-    return main_device_dev_t;
-}
-
 pub const DefaultGlContext = struct {
     egl_ctx: system.EglContext,
     gbm_ctx: system.GbmContext,
@@ -221,11 +201,23 @@ pub const Window = struct {
 
     wants_frame: bool = false,
 
+    format_info: struct {
+        pending: struct {
+            mapped_formats: []const FormatTableItem = &.{},
+
+            // Buffer here as a setting cannot be observed until atomically
+            // committed with done()
+            preferred_gpu: ?u64 = null,
+            preferred_format: ?FormatModifierPair = null,
+        } = .{},
+
+        preferred_gpu: ?u64 = null,
+        preferred_format: ?FormatModifierPair = null,
+    },
+
     alloc: sphtud.util.ExpansionAlloc,
     input_events: sphtud.util.RuntimeSegmentedListUnmanaged(InputEvent),
     pending_input_events: sphtud.util.RuntimeSegmentedListUnmanaged(InputEvent),
-
-    preferred_gpu: ?u64,
 
     const InputEvent = union(enum) {
         pointer_movement: PointerPos,
@@ -262,8 +254,6 @@ pub const Window = struct {
         try bound_interfaces.dmabuf.getDefaultFeedback(writer, .{
             .id = surface_feedback.id,
         });
-
-        const preferred_gpu = try registerForDmaBufFeedback(&client);
 
         const wl_surface = try client.newId(wlb.WlSurface);
         try bound_interfaces.compositor.createSurface(writer, .{
@@ -307,11 +297,10 @@ pub const Window = struct {
             .wl_pointer = wl_pointer,
             .frame_callback = frame_callback,
             .client = client,
-            .preferred_gpu = preferred_gpu,
-
             .alloc = expansion_alloc,
             .input_events = try .init(arena, expansion_alloc, typical_input_events, max_input_events),
             .pending_input_events = try .init(arena, expansion_alloc, typical_input_events, max_input_events),
+            .format_info = .{},
         };
         errdefer ret.deinit();
 
@@ -349,7 +338,11 @@ pub const Window = struct {
     }
 
     pub fn getPreferredGpu(self: Window, alloc: std.mem.Allocator) ![]const u8 {
-        return resolveDriHandleFromDevt(alloc, self.preferred_gpu);
+        return resolveDriHandleFromDevt(alloc, self.format_info.preferred_gpu);
+    }
+
+    pub fn getPreferredFormat(self: Window) ?FormatModifierPair {
+        return self.format_info.preferred_format;
     }
 
     pub fn wait(self: *Window) !void {
@@ -523,6 +516,51 @@ pub const Window = struct {
                         };
                         try self.pending_input_events.append(self.alloc, input_event);
                     }
+                },
+                else => wlclient.logUnusedEvent(event.event),
+            },
+            .zwp_linux_dmabuf_feedback_v1 => |feedback| switch (feedback) {
+                .main_device => |device| {
+                    std.debug.print("Got main device {any}\n", .{device.device});
+                    self.format_info.pending.preferred_gpu = std.mem.bytesToValue(u64, device.device);
+                },
+                .tranche_formats => |params| {
+                    //if (self.format_info.pending.preferred_format != null) break :blk;
+
+                    if (params.indices.len == 0) return error.NoIndices;
+                    const index = params.indices[0];
+
+                    const mapped_formats = self.format_info.pending.mapped_formats;
+                    if (index >= mapped_formats.len) return error.InvalidIndex;
+                    const table_entry = self.format_info.pending.mapped_formats[index];
+
+                    std.debug.print("{any}\n", .{table_entry});
+                    self.format_info.pending.preferred_format = .{
+                        .format = table_entry.format,
+                        .modifier = table_entry.modifier,
+                    };
+                },
+                .format_table => |params| {
+                    const fd = event.fd orelse return error.NoFd;
+                    const mapped = try std.posix.mmap(
+                        null,
+                        params.size,
+                        std.posix.system.PROT.READ,
+                        .{ .TYPE = .PRIVATE },
+                        fd,
+                        0,
+                    );
+
+                    self.format_info.pending.mapped_formats = std.mem.bytesAsSlice(FormatTableItem, mapped);
+                },
+                .done => {
+                    if (self.format_info.pending.mapped_formats.len != 0) {
+                        std.posix.munmap(@alignCast(std.mem.sliceAsBytes(self.format_info.pending.mapped_formats)));
+                    }
+
+                    self.format_info.preferred_gpu = self.format_info.pending.preferred_gpu;
+                    self.format_info.preferred_format = self.format_info.pending.preferred_format;
+                    self.format_info.pending = .{};
                 },
                 else => wlclient.logUnusedEvent(event.event),
             },
