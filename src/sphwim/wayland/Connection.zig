@@ -12,6 +12,8 @@ const wl_cmsg = @import("wl_cmsg");
 
 const Connection = @This();
 
+const logger = std.log.scoped(.wl_connection);
+
 alloc: *sphtud.alloc.Sphalloc,
 scratch: sphtud.alloc.LinearAllocator,
 fd_pool: *FdPool,
@@ -198,9 +200,9 @@ fn poll(ctx: ?*anyopaque, _: *sphtud.event.LoopSphalloc, _: sphtud.event.PollRea
 }
 
 fn logWithTrace(comptime msg: []const u8, args: anytype) void {
-    std.log.err(msg, args);
+    logger.err(msg, args);
     if (@errorReturnTrace()) |t| {
-        std.log.err("{f}", .{t});
+        logger.err("{f}", .{t});
     }
 }
 fn pollError(self: *Connection, diagnostics: *HandleMessageDiagnostics) !void {
@@ -349,7 +351,7 @@ const HandleMessageError = error{
 };
 
 fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomingMessage, fd: ?std.posix.fd_t, diagnostics: *HandleMessageDiagnostics) HandleMessageError!void {
-    std.log.debug("Received {f}", .{formatRequest(req)});
+    logger.debug("Received {f}", .{formatRequest(req)});
 
     const supported_interfaces: []const Bindings.WaylandInterfaceType = &.{
         .wl_compositor,
@@ -465,10 +467,10 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
                 const surface = try self.getXdgSurface(xdg_surface_id, .interface, diagnostics);
 
                 if (surface.outstanding_xdg_configure == params.serial) {
-                    std.log.debug("xdg surface {d} acked (serial {d})", .{ xdg_surface_id.inner, params.serial });
+                    logger.debug("xdg surface {d} acked (serial {d})", .{ xdg_surface_id.inner, params.serial });
                     surface.outstanding_xdg_configure = null;
                 } else {
-                    std.log.debug("stale ack for xdg surface {d} with serial {d}", .{ xdg_surface_id.inner, params.serial });
+                    logger.debug("stale ack for xdg surface {d} with serial {d}", .{ xdg_surface_id.inner, params.serial });
                 }
             },
             // FIXME: handle destroy (and check that role object already destroyed)
@@ -503,7 +505,7 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
                 const surface = try self.getWlSurface(wl_surface_id, .param, diagnostics);
 
                 if (surface.outstanding_xdg_configure != null) {
-                    std.log.debug("received commit for previous xdg state, ignoring", .{});
+                    logger.debug("received commit for previous xdg state, ignoring", .{});
                     return;
                 }
 
@@ -706,7 +708,7 @@ const InterfaceRegistry = struct {
     }
 
     fn put(self: *InterfaceRegistry, object_id: u32, interface_type: Bindings.WaylandInterfaceType, diagnostics: *HandleMessageDiagnostics) !void {
-        std.log.debug("Registering {d} -> {t}", .{ object_id, interface_type });
+        logger.debug("Registering {d} -> {t}", .{ object_id, interface_type });
         const gop = try self.inner.getOrPut(object_id);
 
         if (gop.found_existing) {
@@ -739,7 +741,7 @@ fn parseRequest(op: u32, data: []const u8, interface: Bindings.WaylandInterfaceT
 }
 
 fn logUnhandledRequest(object_id: u32, req: Bindings.WaylandIncomingMessage) void {
-    std.log.warn("Unhandled request by object {d}, {any}", .{ object_id, req });
+    logger.warn("Unhandled request by object {d}, {any}", .{ object_id, req });
 }
 
 fn requiresFd(req: Bindings.WaylandIncomingMessage) bool {
@@ -906,7 +908,7 @@ const RefCountedRenderBuffer = struct {
 
     fn unref(self: *RefCountedRenderBuffer, alloc: std.mem.Allocator, fd_pool: *FdPool) void {
         self.ref_count -= 1;
-        std.log.debug("{*} unrefed, count {d}\n", .{ self, self.ref_count });
+        logger.debug("{*} unrefed, count {d}\n", .{ self, self.ref_count });
         if (self.ref_count == 0) {
             fd_pool.close(self.render_buffer.buf_fd);
             alloc.destroy(self);
