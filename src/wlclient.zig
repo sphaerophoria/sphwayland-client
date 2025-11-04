@@ -11,8 +11,10 @@ pub const sendMessageWithFdAttachment = wl_cmsg.sendMessageWithFdAttachment;
 pub fn Client(comptime Bindings: type) type {
     return struct {
         interfaces: InterfaceRegistry(Bindings),
+
         stream: std.net.Stream,
-        event_buf: DoubleEndedBuf = .{},
+        stream_reader: *wlio.Reader,
+
         stream_writer: std.net.Stream.Writer,
 
         const Self = @This();
@@ -28,14 +30,19 @@ pub fn Client(comptime Bindings: type) type {
 
             const interfaces = try InterfaceRegistry(Bindings).init(alloc, expansion_alloc, registry);
 
+            const stream_reader = try alloc.create(wlio.Reader);
+            stream_reader.* = try wlio.Reader.init(alloc, stream);
+
             return .{
                 .interfaces = interfaces,
+                .stream_reader = stream_reader,
                 .stream = stream,
                 .stream_writer = stream_writer,
             };
         }
 
         pub fn deinit(self: *Self) void {
+            self.stream_reader.deinit();
             self.stream.close();
         }
 
@@ -153,29 +160,17 @@ pub fn InterfaceRegistry(comptime Bindings: type) type {
     };
 }
 
-// Data is read into the buffer in chunks, and consumed from the
-// beginning, once we cannot read any more from the buffer, we shift
-// the remaining data back and wait for more data to show up
-//
-// Wrapping the stream in a bufreader seems like a good idea, but the
-// edge case of half a header being at the end of the buf would not be
-// handled well there
-const DoubleEndedBuf = struct {
-    data: [4096]u8 = undefined,
-    back: usize = 0,
-    front: usize = 0,
-
-    fn shift(self: *DoubleEndedBuf) void {
-        std.mem.copyForwards(u8, &self.data, self.data[self.front..]);
-        self.back -= self.front;
-        self.front = 0;
-    }
-};
-
 pub fn Event(comptime Bindings: type) type {
     return struct {
         object_id: u32,
         event: Bindings.WaylandIncomingMessage,
+        fd: ?std.posix.fd_t,
+
+        pub fn deinit(self: @This()) void {
+            if (self.fd) |fd| {
+                std.posix.close(fd);
+            }
+        }
     };
 }
 
@@ -193,23 +188,7 @@ pub fn EventIt(comptime Bindings: type) type {
 
         // NOTE: Output data is backed by internal buffer and is invalidated on next call to next()
         pub fn retrieveEvents(self: *Self) !void {
-            self.client.event_buf.shift();
-
-            const num_bytes_read = try self.client.stream.read(self.client.event_buf.data[self.client.event_buf.back..]);
-            if (num_bytes_read == 0) {
-                return error.RemoteClosed;
-            }
-
-            self.client.event_buf.back += num_bytes_read;
-        }
-
-        pub fn getEventBlocking(self: *Self) !Event(Bindings) {
-            while (true) {
-                if (try self.getAvailableEvent()) |v| {
-                    return v;
-                }
-                try self.wait();
-            }
+            try self.client.stream_reader.interface.fillMore();
         }
 
         pub fn getAvailableEvent(self: *Self) !?Event(Bindings) {
@@ -238,38 +217,50 @@ pub fn EventIt(comptime Bindings: type) type {
             }
         }
 
+        const EventData = struct {
+            header: wlio.HeaderLE,
+            data: []const u8,
+        };
+
+        fn peekEventData(self: *Self) !EventData {
+            var io_reader = std.Io.Reader.fixed(self.client.stream_reader.interface.buffered());
+            const header = try io_reader.peekStruct(wlio.HeaderLE, .little);
+            const full_data = try io_reader.take(header.size);
+            const data = full_data[@sizeOf(wlio.HeaderLE)..];
+
+            return .{
+                .header = header,
+                .data = data,
+            };
+        }
+
         fn getBufferedEvent(self: *Self) !?Event(Bindings) {
-            const header_end = self.client.event_buf.front + @sizeOf(wlio.HeaderLE);
-            if (header_end > self.client.event_buf.back) {
-                return null;
-            }
-            const header = std.mem.bytesToValue(HeaderLE, self.client.event_buf.data[self.client.event_buf.front..header_end]);
-            const data_end = self.client.event_buf.front + header.size;
-            if (data_end > self.client.event_buf.data.len and self.client.event_buf.front == 0) {
-                return error.DataTooLarge;
-            }
-            if (data_end > self.client.event_buf.back) {
-                return null;
-            }
+            const event_data = self.peekEventData() catch |e| switch (e) {
+                error.EndOfStream => return null,
+                else => return e,
+            };
 
-            defer self.client.event_buf.front = data_end;
+            self.client.stream_reader.interface.toss(event_data.header.size);
 
-            const data = self.client.event_buf.data[header_end..data_end];
-            const interface = self.client.interfaces.get(header.id) orelse return null;
+            const interface = self.client.interfaces.get(event_data.header.id) orelse return null;
 
             inline for (std.meta.fields(Bindings.WaylandIncomingMessage)) |field| {
                 if (@field(Bindings.WaylandInterfaceType, field.name) == interface) {
-                    if (@hasDecl(field.type, "parse")) {
-                        return .{
-                            .object_id = header.id,
-                            .event = @unionInit(Bindings.WaylandIncomingMessage, field.name, try field.type.parse(header.op, data)),
-                        };
-                    } else {
-                        return .{
-                            .object_id = header.id,
-                            .event = @unionInit(Bindings.WaylandIncomingMessage, field.name, .{}),
-                        };
+                    const msg: Bindings.WaylandIncomingMessage = if (@hasDecl(field.type, "parse"))
+                        @unionInit(Bindings.WaylandIncomingMessage, field.name, try field.type.parse(event_data.header.op, event_data.data))
+                    else
+                        @unionInit(Bindings.WaylandIncomingMessage, field.name, .{});
+
+                    var fd: ?std.posix.fd_t = null;
+                    if (wlio.requiresFd(msg)) {
+                        fd = self.client.stream_reader.fd_list.pop() orelse return error.NoFd;
                     }
+
+                    return .{
+                        .object_id = event_data.header.id,
+                        .event = msg,
+                        .fd = fd,
+                    };
                 }
             }
 

@@ -26,6 +26,8 @@ fn bindInterfaces(client: *wlclient.Client(wlb)) !BoundInterfaces {
     var wl_seat: ?wlb.WlSeat = null;
 
     while (try it.getAvailableEvent()) |event| {
+        defer event.deinit();
+
         switch (event.event) {
             .wl_display => |parsed| {
                 switch (parsed) {
@@ -337,6 +339,8 @@ pub const Window = struct {
         self.clearInputEvents();
 
         while (try it.getAvailableEvent()) |event| {
+            defer event.deinit();
+
             if (try self.handleEvent(event, gl_ctx)) {
                 return true;
             }
