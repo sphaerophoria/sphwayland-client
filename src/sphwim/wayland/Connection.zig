@@ -1,11 +1,11 @@
 const std = @import("std");
 const sphtud = @import("sphtud");
-const Reader = @import("Reader.zig");
 const rendering = @import("../rendering.zig");
 const Bindings = @import("wayland_bindings");
 const wlio = @import("wlio");
+const Reader = wlio.Reader;
+const FdPool = wlio.FdPool;
 const CompositorState = @import("../CompositorState.zig");
-const FdPool = @import("../FdPool.zig");
 const system_gl = @import("../system_gl.zig");
 const server = @import("../wayland.zig");
 const wl_cmsg = @import("wl_cmsg");
@@ -69,7 +69,7 @@ pub fn init(
     const io_writer = &stream_writer.interface;
 
     const fd_pool = try alloc.arena().create(FdPool);
-    fd_pool.* = try .init(alloc, 8, 100);
+    fd_pool.* = try .init(alloc.arena(), 8, 100);
 
     const stream_reader = try alloc.arena().create(Reader);
     stream_reader.* = try Reader.init(alloc.arena(), fd_pool, connection.stream);
@@ -222,7 +222,7 @@ fn pollError(self: *Connection, diagnostics: *HandleMessageDiagnostics) !void {
         };
 
         var fd: ?std.posix.fd_t = null;
-        if (requiresFd(req)) {
+        if (wlio.requiresFd(req)) {
             fd = self.stream_reader.fd_list.pop() orelse {
                 if (!retrying) {
                     // While wayland messages do have a max size significantly
@@ -742,23 +742,6 @@ fn parseRequest(op: u32, data: []const u8, interface: Bindings.WaylandInterfaceT
 
 fn logUnhandledRequest(object_id: u32, req: Bindings.WaylandIncomingMessage) void {
     logger.warn("Unhandled request by object {d}, {any}", .{ object_id, req });
-}
-
-fn requiresFd(req: Bindings.WaylandIncomingMessage) bool {
-    switch (req) {
-        inline else => |_, t| {
-            const interface_message = @field(req, @tagName(t));
-            if (@typeInfo(@TypeOf(interface_message)) == .@"struct") {
-                return false;
-            }
-            switch (interface_message) {
-                inline else => |_, t2| {
-                    const concrete_message = @field(interface_message, @tagName(t2));
-                    return @TypeOf(concrete_message).requires_fd;
-                },
-            }
-        },
-    }
 }
 
 fn sendSurfaceFeedback(self: *Connection, params: anytype, diagnostics: *HandleMessageDiagnostics) !void {

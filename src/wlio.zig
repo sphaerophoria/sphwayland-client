@@ -1,5 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const sphtud = @import("sphtud");
+const wl_cmsg = @import("wl_cmsg");
 
 pub const HeaderLE = packed struct { id: u32, op: u16, size: u16 };
 
@@ -160,4 +162,139 @@ fn roundUp(val: anytype, mul: @TypeOf(val)) @TypeOf(val) {
         return 0;
     }
     return ((val - 1) / mul + 1) * mul;
+}
+
+// FIXME: This should live in sphtud or something?
+pub const FdPool = struct {
+    inner: sphtud.util.AutoHashMap(std.posix.fd_t, void),
+
+    pub fn init(alloc: std.mem.Allocator, typical_files: usize, max_files: usize) !FdPool {
+        return .{
+            .inner = try .init(alloc, .linear(alloc), typical_files, max_files),
+        };
+    }
+
+    pub fn register(self: *FdPool, fd: std.posix.fd_t) !void {
+        try self.inner.put(fd, {});
+    }
+
+    pub fn close(self: *FdPool, fd: std.posix.fd_t) void {
+        std.posix.close(fd);
+        _ = self.inner.remove(fd);
+    }
+
+    pub fn closeAll(self: *FdPool) void {
+        var it = self.inner.iter();
+        while (it.next()) |item| {
+            std.posix.close(item.key.*);
+        }
+    }
+};
+
+pub const Reader = struct {
+    socket: std.net.Stream,
+    fd_pool: *FdPool,
+    fd_list: sphtud.util.CircularBuffer(std.posix.fd_t),
+    last_res: std.os.linux.E = .SUCCESS,
+    interface: std.Io.Reader,
+
+    pub fn init(alloc: std.mem.Allocator, fd_pool: *FdPool, socket: std.net.Stream) !Reader {
+        return .{
+            .socket = socket,
+            .fd_pool = fd_pool,
+            .fd_list = .{
+                // 100 file descriptors received before we handle any of them seems
+                // like an insanely large number for a single connection
+                .items = try alloc.alloc(c_int, 100),
+            },
+            .interface = std.Io.Reader{
+                .buffer = try alloc.alloc(u8, 4096),
+                .vtable = &.{
+                    .stream = stream,
+                },
+                .seek = 0,
+                .end = 0,
+            },
+        };
+    }
+
+    fn stream(r: *std.Io.Reader, writer: *std.Io.Writer, limit: std.Io.Limit) error{ EndOfStream, ReadFailed, WriteFailed }!usize {
+        const self: *Reader = @fieldParentPtr("interface", r);
+        self.last_res = .SUCCESS;
+
+        const dest = limit.slice(try writer.writableSliceGreedy(1));
+
+        var iov: [1]std.posix.iovec = .{.{
+            .base = dest.ptr,
+            .len = dest.len,
+        }};
+
+        var control: [wl_cmsg.max_buf_size]u8 = undefined;
+        var msg_header = std.os.linux.msghdr{
+            .name = null,
+            .namelen = 0,
+            .iov = &iov,
+            .iovlen = 1,
+            .control = &control,
+            .controllen = control.len,
+            .flags = 0,
+        };
+
+        // We could recvmmsg here, but for now this is good enough
+        const ret = std.os.linux.recvmsg(self.socket.handle, &msg_header, 0);
+
+        if (ret == 0) return error.EndOfStream;
+
+        const linux_err: std.os.linux.E = .init(ret);
+        switch (linux_err) {
+            .SUCCESS => {},
+            else => {
+                self.last_res = linux_err;
+                return error.ReadFailed;
+            },
+        }
+
+        if (msg_header.controllen >= @sizeOf(wl_cmsg.CmsgHdr)) blk: {
+            const hdr = std.mem.bytesToValue(wl_cmsg.CmsgHdr, &control);
+            if (hdr.cmsg_level == std.os.linux.SOL.SOCKET) {
+                var offs: usize = wl_cmsg.fd_list_start;
+                while (offs < hdr.cmsg_len) {
+                    const fd: c_int = std.mem.bytesToValue(c_int, control[offs..][0..4]);
+                    offs += 4;
+
+                    self.fd_pool.register(fd) catch {
+                        std.log.err("Dropped file descriptor", .{});
+                        std.posix.close(fd);
+                        break :blk;
+                    };
+
+                    self.fd_list.pushNoClobber(fd) catch {
+                        std.log.err("Dropped file descriptor", .{});
+                        self.fd_pool.close(fd);
+                        break :blk;
+                    };
+                }
+            }
+        }
+
+        writer.advance(@intCast(ret));
+        return @intCast(ret);
+    }
+};
+
+pub fn requiresFd(req: anytype) bool {
+    switch (req) {
+        inline else => |_, t| {
+            const interface_message = @field(req, @tagName(t));
+            if (@typeInfo(@TypeOf(interface_message)) == .@"struct") {
+                return false;
+            }
+            switch (interface_message) {
+                inline else => |_, t2| {
+                    const concrete_message = @field(interface_message, @tagName(t2));
+                    return @TypeOf(concrete_message).requires_fd;
+                },
+            }
+        },
+    }
 }

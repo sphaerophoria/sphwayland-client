@@ -4,7 +4,6 @@ const CompositorState = @import("CompositorState.zig");
 const rendering = @import("rendering.zig");
 const system_gl = @import("system_gl.zig");
 
-pub const Reader = @import("wayland/Reader.zig");
 pub const Connection = @import("wayland/Connection.zig");
 
 pub const FormatTable = struct {

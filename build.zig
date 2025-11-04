@@ -42,12 +42,20 @@ const Builder = struct {
         }).module("sphtud");
     }
 
-    pub fn makeWlio(self: Builder) *std.Build.Module {
-        return self.b.addModule("wlio", .{
+    pub fn makeWlio(
+        self: Builder,
+        wl_cmsg: *std.Build.Module,
+        sphtud: *std.Build.Module,
+    ) *std.Build.Module {
+        const ret = self.b.addModule("wlio", .{
             .root_source_file = self.b.path("src/wlio.zig"),
             .target = self.target,
             .optimize = self.optimize,
         });
+        ret.addImport("sphtud", sphtud);
+        ret.addImport("wl_cmsg", wl_cmsg);
+
+        return ret;
     }
 
     pub fn makeWlgen(self: Builder) *std.Build.Step.Compile {
@@ -267,10 +275,10 @@ pub fn build(b: *std.Build) !void {
     };
 
     const sphtud = builder.importSphtud();
-    const wlio_mod = builder.makeWlio();
+    const wl_cmsg = builder.makeWlCmsg();
+    const wlio_mod = builder.makeWlio(wl_cmsg, sphtud);
     const wlgen = builder.makeWlgen();
     const client_bindings = builder.makeClientBindings(wlgen, wlio_mod);
-    const wl_cmsg = builder.makeWlCmsg();
     const wlclient = builder.makeWlClient(wlio_mod, wl_cmsg, sphtud);
     const system_gl_bindings = try builder.makeSystemGlBindings();
     const sphwindow = try builder.makeWindow(wlio_mod, client_bindings, wlclient, system_gl_bindings, sphtud);
