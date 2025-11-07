@@ -272,7 +272,7 @@ pub const EglContext = struct {
                 // We import with GL_TEXTURE_2D, not GL_TEXTURE_EXTERNAL_OES.
                 //
                 // This means we only support linear textures (id 0)
-                if (modifiers.modifiers[self.modifier_idx] != 0) {
+                if (modifiers.modifiers[self.modifier_idx] != 0 and modifiers.modifiers[self.modifier_idx] != drm_modifier_invalid) {
                     continue;
                 }
 
