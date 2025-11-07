@@ -1,10 +1,17 @@
 const std = @import("std");
+const sphtud = @import("sphtud");
+const CompositorState = @import("../CompositorState.zig");
 const rendering = @import("../rendering.zig");
 
 const NullRenderBackend = @This();
 
-pub fn init() !rendering.RenderBackend {
-    const fd = try std.posix.timerfd_create(.MONOTONIC, .{});
+fd: std.posix.fd_t,
+
+pub fn init(alloc: std.mem.Allocator) !rendering.RenderBackend {
+    const ctx = try alloc.create(NullRenderBackend);
+    ctx.* = .{
+        .fd = try std.posix.timerfd_create(.MONOTONIC, .{}),
+    };
     var next = std.posix.system.itimerspec{
         .it_value = .{
             .sec = 1,
@@ -15,37 +22,71 @@ pub fn init() !rendering.RenderBackend {
             .nsec = 0,
         },
     };
-    try std.posix.timerfd_settime(fd, .{}, &next, null);
+    try std.posix.timerfd_settime(ctx.fd, .{}, &next, null);
 
     return .{
-        .ctx = null,
-        .event_fd = fd,
-        .device_path = "/dev/dri/card0",
+        .preferred_gpu = "/dev/dri/card0",
+        .initial_res = .{ .width = 640, .height = 480 },
+        .ctx = ctx,
         .vtable = &.{
-            .displayBuffer = displayBuffer,
-            .currentResolution = currentResolution,
-            .service = service,
+            .makeHandler = makeHandler,
             .deinit = deinit,
         },
     };
 }
 
-fn deinit(_: ?*anyopaque, fd: std.posix.fd_t) void {
-    std.posix.close(fd);
+fn deinit(ctx: ?*anyopaque) void {
+    const self: *NullRenderBackend = @ptrCast(@alignCast(ctx));
+    std.posix.close(self.fd);
 }
 
-fn currentResolution(_: ?*anyopaque, _: std.posix.fd_t) !rendering.Resolution {
-    return .{
-        .width = 640,
-        .height = 480,
+const Handler = struct {
+    parent: *NullRenderBackend,
+    renderer: *rendering.Renderer,
+
+    fn poll(ctx: ?*anyopaque, _: *sphtud.event.LoopSphalloc, _: sphtud.event.PollReason) sphtud.event.LoopSphalloc.PollResult {
+        const self: *Handler = @ptrCast(@alignCast(ctx));
+
+        self.pollError() catch |e| {
+            std.log.err("Timer poll failed: {t}", .{e});
+            return .complete;
+        };
+
+        return .in_progress;
+    }
+
+    fn pollError(self: *Handler) !void {
+        var read_time: u64 = undefined;
+        _ = try std.posix.read(self.parent.fd, std.mem.asBytes(&read_time));
+
+        const buf = try self.renderer.render();
+        if (buf) |b| {
+            self.renderer.releaseBuffer(b);
+        }
+    }
+
+    fn close(_: ?*anyopaque) void {}
+};
+
+fn makeHandler(ctx: ?*anyopaque, alloc: std.mem.Allocator, renderer: *rendering.Renderer) anyerror!sphtud.event.LoopSphalloc.Handler {
+    const self: *NullRenderBackend = @ptrCast(@alignCast(ctx));
+
+    const handler_ctx = try alloc.create(Handler);
+    handler_ctx.* = .{
+        .parent = self,
+        .renderer = renderer,
     };
-}
 
-fn displayBuffer(_: ?*anyopaque, _: rendering.RenderBuffer, locked: *bool) !void {
-    locked.* = false;
-}
-
-fn service(_: ?*anyopaque, fd: std.posix.fd_t) !void {
-    var read_time: u64 = undefined;
-    _ = try std.posix.read(fd, std.mem.asBytes(&read_time));
+    return .{
+        .ptr = handler_ctx,
+        .vtable = &.{
+            .poll = Handler.poll,
+            .close = Handler.close,
+        },
+        .fd = self.fd,
+        .desired_events = .{
+            .read = true,
+            .write = false,
+        },
+    };
 }

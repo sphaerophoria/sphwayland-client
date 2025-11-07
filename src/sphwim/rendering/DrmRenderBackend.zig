@@ -1,4 +1,6 @@
 const std = @import("std");
+const sphtud = @import("sphtud");
+const CompositorState = @import("../CompositorState.zig");
 const c = @cImport({
     @cInclude("xf86drm.h");
     @cInclude("xf86drmMode.h");
@@ -6,12 +8,14 @@ const c = @cImport({
 
 const rendering = @import("../rendering.zig");
 const Drm = @This();
+const system_gl = @import("../system_gl.zig");
 
 crtc_id: u32,
 dri_file: std.fs.File,
 connector_id: u32,
 preferred_mode: c.drmModeModeInfo,
 crtc_set: bool = false,
+outstanding_buffer: ?system_gl.GbmContext.Buffer,
 
 pub fn init(alloc: std.mem.Allocator) !rendering.RenderBackend {
     const best_gpu = try selectBestGPU(alloc);
@@ -48,24 +52,128 @@ pub fn init(alloc: std.mem.Allocator) !rendering.RenderBackend {
         .dri_file = f,
         .connector_id = connector.connector_id,
         .preferred_mode = preferred_mode.*,
+        .outstanding_buffer = null,
     };
 
     return .{
+        .preferred_gpu = best_gpu,
+        .initial_res = .{
+            .width = preferred_mode.hdisplay,
+            .height = preferred_mode.vdisplay,
+        },
         .ctx = ret,
-        .event_fd = f.handle,
-        .device_path = best_gpu,
         .vtable = &.{
-            .displayBuffer = displayBuffer,
-            .currentResolution = currentResolution,
-            .service = service,
+            .makeHandler = makeHandler,
             .deinit = deinit,
         },
     };
 }
 
-pub fn deinit(ctx: ?*anyopaque, _: std.posix.fd_t) void {
+pub fn deinit(ctx: ?*anyopaque) void {
     const self: *Drm = @ptrCast(@alignCast(ctx));
     self.dri_file.close();
+}
+
+const Handler = struct {
+    parent: *Drm,
+    renderer: *rendering.Renderer,
+
+    pub fn close(_: ?*anyopaque) void {}
+
+    fn poll(ctx: ?*anyopaque, _: *sphtud.event.LoopSphalloc, reason: sphtud.event.PollReason) sphtud.event.LoopSphalloc.PollResult {
+        const self: *Handler = @ptrCast(@alignCast(ctx));
+
+        self.pollError(reason) catch |e| {
+            std.log.err("Failed to poll: {t}", .{e});
+            return .in_progress;
+        };
+
+        return .in_progress;
+    }
+
+    fn pollError(self: *Handler, reason: sphtud.event.PollReason) !void {
+        if (reason == .init) {
+            // Initial render to kick off vsync loop
+            try self.render();
+            return;
+        }
+
+        var evctx = c.drmEventContext{
+            .version = 2,
+            .page_flip_handler = pageFlipHandler,
+        };
+        _ = c.drmHandleEvent(self.parent.dri_file.handle, &evctx);
+
+        if (self.parent.outstanding_buffer == null) {
+            try self.render();
+        }
+    }
+
+    fn render(self: *Handler) !void {
+        std.debug.assert(self.parent.outstanding_buffer == null);
+
+        const gbm_buffer = (try self.renderer.render()) orelse return;
+        self.parent.outstanding_buffer = gbm_buffer;
+
+        const render_buffer = try rendering.RenderBuffer.fromGbm(gbm_buffer);
+        defer render_buffer.deinit();
+
+        const fb_id = try self.parent.fbFromRenderBuffer(render_buffer);
+
+        // Some systems need a valid framebuffer on first crtc set. We could do an
+        // initial render before initializing DRM, but the rest of the codebase is
+        // simpler if we just lazily initialize on the first render call
+        if (!self.parent.crtc_set) {
+            try drmErrCheck(
+                c.drmModeSetCrtc(
+                    self.parent.dri_file.handle,
+                    self.parent.crtc_id,
+                    fb_id,
+                    0,
+                    0,
+                    &self.parent.connector_id,
+                    1,
+                    &self.parent.preferred_mode,
+                ),
+                error.SetMode,
+            );
+            self.parent.crtc_set = true;
+        }
+
+        try drmErrCheck(
+            c.drmModePageFlip(
+                self.parent.dri_file.handle,
+                self.parent.crtc_id,
+                fb_id,
+                c.DRM_MODE_PAGE_FLIP_EVENT,
+                self,
+            ),
+            error.PageFlip,
+        );
+    }
+};
+
+fn makeHandler(ctx: ?*anyopaque, alloc: std.mem.Allocator, renderer: *rendering.Renderer) !sphtud.event.LoopSphalloc.Handler {
+    const self: *Drm = @ptrCast(@alignCast(ctx));
+
+    const handler_ctx = try alloc.create(Handler);
+    handler_ctx.* = .{
+        .parent = self,
+        .renderer = renderer,
+    };
+
+    return .{
+        .desired_events = .{
+            .read = true,
+            .write = false,
+        },
+        .fd = self.dri_file.handle,
+        .ptr = handler_ctx,
+        .vtable = &.{
+            .poll = Handler.poll,
+            .close = Handler.close,
+        },
+    };
 }
 
 fn drmErrCheck(rc: c_int, on_err: anyerror) !void {
@@ -74,62 +182,6 @@ fn drmErrCheck(rc: c_int, on_err: anyerror) !void {
         std.log.err("drm returning {t} due to {d}", .{ on_err, errno.* });
         return on_err;
     }
-}
-
-fn service(_: ?*anyopaque, fd: std.posix.fd_t) !void {
-    var evctx = c.drmEventContext{
-        .version = 2,
-        .page_flip_handler = pageFlipHandler,
-    };
-    _ = c.drmHandleEvent(fd, &evctx);
-}
-
-fn displayBuffer(ctx: ?*anyopaque, buffer: rendering.RenderBuffer, locked_flag: *bool) !void {
-    const self: *Drm = @ptrCast(@alignCast(ctx));
-
-    const fb_id = try self.fbFromRenderBuffer(buffer);
-
-    // Buffer is on GPU, we are not allowed to delete it :)
-    locked_flag.* = true;
-
-    // Some systems need a valid framebuffer on first crtc set. We could do an
-    // initial render before initializing DRM, but the rest of the codebase is
-    // simpler if we just lazily initialize on the first render call
-    if (!self.crtc_set) {
-        try drmErrCheck(
-            c.drmModeSetCrtc(
-                self.dri_file.handle,
-                self.crtc_id,
-                fb_id,
-                0,
-                0,
-                &self.connector_id,
-                1,
-                &self.preferred_mode,
-            ),
-            error.SetMode,
-        );
-        self.crtc_set = true;
-    }
-
-    try drmErrCheck(
-        c.drmModePageFlip(
-            self.dri_file.handle,
-            self.crtc_id,
-            fb_id,
-            c.DRM_MODE_PAGE_FLIP_EVENT,
-            locked_flag,
-        ),
-        error.PageFlip,
-    );
-}
-
-fn currentResolution(ctx: ?*anyopaque, _: std.posix.fd_t) !rendering.Resolution {
-    const self: *Drm = @ptrCast(@alignCast(ctx));
-    return .{
-        .width = self.preferred_mode.hdisplay,
-        .height = self.preferred_mode.vdisplay,
-    };
 }
 
 fn fbFromRenderBuffer(self: *Drm, buffer: rendering.RenderBuffer) !u32 {
@@ -214,8 +266,10 @@ fn pageFlipHandler(fd: c_int, frame: c_uint, sec: c_uint, usec: c_uint, data: ?*
     _ = frame;
     _ = sec;
     _ = usec;
-    const locked: *bool = @ptrCast(@alignCast(data));
-    locked.* = false;
+    const handler: *Handler = @ptrCast(@alignCast(data));
+    const to_release = handler.parent.outstanding_buffer.?;
+    handler.renderer.releaseBuffer(to_release);
+    handler.parent.outstanding_buffer = null;
 }
 
 fn getFirstConnectedConnector(f: std.fs.File, resources: *c.drmModeRes) ?*c.drmModeConnector {

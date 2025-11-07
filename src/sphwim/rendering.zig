@@ -20,6 +20,23 @@ pub const RenderBuffer = struct {
     width: i32,
     height: i32,
     format: u32,
+
+    pub fn fromGbm(gbm_buf: system_gl.GbmContext.Buffer) !RenderBuffer {
+        return .{
+            .buf_fd = try gbm_buf.fd(),
+            .modifiers = gbm_buf.modifier(),
+            .offset = gbm_buf.offset(),
+            .plane_idx = 0, // HACK, assume plane 0
+            .stride = gbm_buf.stride(),
+            .width = @intCast(gbm_buf.width()),
+            .height = @intCast(gbm_buf.height()),
+            .format = gbm_buf.format(),
+        };
+    }
+
+    pub fn deinit(self: RenderBuffer) void {
+        std.posix.close(self.buf_fd);
+    }
 };
 
 pub const Resolution = struct {
@@ -28,32 +45,22 @@ pub const Resolution = struct {
 };
 
 pub const RenderBackend = struct {
+    preferred_gpu: []const u8,
+    initial_res: Resolution,
     ctx: ?*anyopaque,
-    event_fd: std.posix.fd_t,
-    device_path: []const u8,
     vtable: *const VTable,
 
     const VTable = struct {
-        displayBuffer: *const fn (ctx: ?*anyopaque, render_buffer: RenderBuffer, locked_flag: *bool) anyerror!void,
-        currentResolution: *const fn (ctx: ?*anyopaque, fd: std.posix.fd_t) anyerror!Resolution,
-        service: *const fn (ctx: ?*anyopaque, fd: std.posix.fd_t) anyerror!void,
-        deinit: *const fn (ctx: ?*anyopaque, fd: std.posix.fd_t) void,
+        makeHandler: *const fn (ctx: ?*anyopaque, alloc: std.mem.Allocator, renderer: *Renderer) anyerror!sphtud.event.LoopSphalloc.Handler,
+        deinit: *const fn (ctx: ?*anyopaque) void,
     };
 
+    pub fn makeHandler(self: RenderBackend, alloc: std.mem.Allocator, renderer: *Renderer) !sphtud.event.LoopSphalloc.Handler {
+        return self.vtable.makeHandler(self.ctx, alloc, renderer);
+    }
+
     pub fn deinit(self: RenderBackend) void {
-        self.vtable.deinit(self.ctx, self.event_fd);
-    }
-
-    pub fn currentResolution(self: RenderBackend) !Resolution {
-        return self.vtable.currentResolution(self.ctx, self.event_fd);
-    }
-
-    pub fn displayBuffer(self: RenderBackend, render_buffer: RenderBuffer, locked_flag: *bool) !void {
-        try self.vtable.displayBuffer(self.ctx, render_buffer, locked_flag);
-    }
-
-    pub fn service(self: RenderBackend) !void {
-        try self.vtable.service(self.ctx, self.event_fd);
+        return self.vtable.deinit(self.ctx);
     }
 };
 
@@ -65,7 +72,7 @@ pub fn initRenderBackend(alloc: std.mem.Allocator) !RenderBackend {
     }
 
     logger.warn("Failed to init render backend, using null backend", .{});
-    return try NullRenderBackend.init();
+    return try NullRenderBackend.init(alloc);
 }
 
 fn asf32(in: anytype) f32 {
@@ -91,11 +98,6 @@ pub const Renderer = struct {
     // compositor is rendering
     background_animation_state: f32 = 1.0,
     cursor_tex: sphtud.render.Texture,
-
-    const vtable = sphtud.event.LoopSphalloc.Handler.VTable{
-        .poll = poll,
-        .close = close,
-    };
 
     pub fn init(
         alloc: *sphtud.alloc.Sphalloc,
@@ -131,65 +133,13 @@ pub const Renderer = struct {
         };
     }
 
-    pub fn handler(self: *Renderer) sphtud.event.LoopSphalloc.Handler {
-        return .{
-            .ptr = self,
-            .fd = self.render_backend.event_fd,
-            .desired_events = .{
-                .read = true,
-                .write = true,
-            },
-            .vtable = &vtable,
-        };
+    pub fn releaseBuffer(self: *Renderer, buf: system_gl.GbmContext.Buffer) void {
+        self.gbm_ctx.unlock(buf);
     }
 
-    fn poll(ctx: ?*anyopaque, _: *sphtud.event.LoopSphalloc, reason: sphtud.event.PollReason) sphtud.event.LoopSphalloc.PollResult {
-        const self: *Renderer = @ptrCast(@alignCast(ctx));
-        self.pollError(reason) catch |e| {
-            logger.err("Failed to poll: {t}", .{e});
-            return .in_progress;
-        };
-
-        return .in_progress;
-    }
-
-    fn pollError(self: *Renderer, reason: sphtud.event.PollReason) !void {
-        const is_readable = switch (reason) {
-            .io => |io_reasons| io_reasons.read,
-            .init => false,
-        };
-
+    pub fn render(self: *Renderer) !?system_gl.GbmContext.Buffer {
         const now = try std.time.Instant.now();
         defer self.last_render_time = now;
-
-        if (reason == .init) {
-            try self.renderCompositor(now);
-            return;
-        }
-
-        if (!is_readable) {
-            logger.debug("renderer file not readable, returning early", .{});
-            return;
-        }
-
-        try self.render_backend.service();
-
-        if (!self.render_in_progress) {
-            try self.renderCompositor(now);
-        }
-
-        logger.debug("rendered after {d}ms", .{now.since(self.last_render_time) / std.time.ns_per_ms});
-    }
-
-    fn close(ctx: ?*anyopaque) void {
-        _ = ctx;
-    }
-
-    fn renderCompositor(self: *Renderer, now: std.time.Instant) !void {
-        if (self.backend_rendering_buf) |buf| {
-            self.gbm_ctx.unlock(buf);
-            self.backend_rendering_buf = null;
-        }
 
         const delta_ns = now.since(self.last_render_time);
         const delta = @as(f32, @floatFromInt(delta_ns)) / std.time.ns_per_s;
@@ -226,23 +176,10 @@ pub const Renderer = struct {
         const front_buf = try self.gbm_ctx.lockFront();
         errdefer self.gbm_ctx.unlock(front_buf);
 
-        const render_buffer = RenderBuffer{
-            .buf_fd = try front_buf.fd(),
-            .modifiers = front_buf.modifier(),
-            .offset = front_buf.offset(),
-            .plane_idx = 0, // HACK, assume plane 0
-            .stride = front_buf.stride(),
-            .width = @intCast(front_buf.width()),
-            .height = @intCast(front_buf.height()),
-            .format = front_buf.format(),
-        };
-        defer std.posix.close(render_buffer.buf_fd);
-
-        try self.render_backend.displayBuffer(render_buffer, &self.render_in_progress);
-        self.backend_rendering_buf = front_buf;
-
         try self.compositor_state.requestFrame();
         logger.debug("rendered after {d}ms", .{now.since(self.last_render_time) / std.time.ns_per_ms});
+
+        return front_buf;
     }
 
     fn renderCursor(self: *Renderer) void {

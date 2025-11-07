@@ -9,7 +9,6 @@ scratch: *sphtud.alloc.BufAllocator,
 compositor_res: rendering.Resolution,
 cursor_pos: CursorPos,
 renderables: Renderables,
-render_backend: rendering.RenderBackend,
 
 const CursorPos = struct {
     x: f32,
@@ -18,7 +17,7 @@ const CursorPos = struct {
 
 const CompositorState = @This();
 
-pub fn init(alloc: *sphtud.alloc.Sphalloc, scratch: *sphtud.alloc.BufAllocator, random: std.Random, current_res: rendering.Resolution, render_backend: rendering.RenderBackend) !CompositorState {
+pub fn init(alloc: *sphtud.alloc.Sphalloc, scratch: *sphtud.alloc.BufAllocator, random: std.Random, current_res: rendering.Resolution) !CompositorState {
     return .{
         .scratch = scratch,
         .compositor_res = current_res,
@@ -27,7 +26,6 @@ pub fn init(alloc: *sphtud.alloc.Sphalloc, scratch: *sphtud.alloc.BufAllocator, 
             .y = @floatFromInt(current_res.height / 2),
         },
         .renderables = try .init(alloc, scratch.linear(), random),
-        .render_backend = render_backend,
     };
 }
 

@@ -106,9 +106,7 @@ pub fn main() !void {
     const render_backend = try rendering.initRenderBackend(root_alloc.arena());
     defer render_backend.deinit();
 
-    const preferred_size = try render_backend.currentResolution();
-
-    var gbm_context = try system_gl.GbmContext.init(preferred_size.width, preferred_size.height, render_backend.device_path);
+    var gbm_context = try system_gl.GbmContext.init(render_backend.initial_res.width, render_backend.initial_res.height, render_backend.preferred_gpu);
     errdefer gbm_context.deinit();
 
     var egl_context = try system_gl.EglContext.init(root_alloc.arena(), gbm_context);
@@ -122,7 +120,7 @@ pub fn main() !void {
     try std.posix.getrandom(std.mem.asBytes(&rng_seed));
     var rng = std.Random.DefaultPrng.init(rng_seed);
 
-    var compositor_state = try CompositorState.init(&root_alloc, &scratch, rng.random(), preferred_size, render_backend);
+    var compositor_state = try CompositorState.init(&root_alloc, &scratch, rng.random(), render_backend.initial_res);
     var memory_dumper = try PeriodicMemoryDumper.init(&root_alloc, &scratch);
 
     var gl_alloc = try sphtud.render.GlAlloc.init(&root_alloc);
@@ -151,7 +149,6 @@ pub fn main() !void {
         root_alloc.arena(),
         root_alloc.block_alloc.allocator(),
     );
-    try loop.register(renderer.handler());
 
     var server = try wayland.makeWaylandServer(
         try root_alloc.makeSubAlloc("server"),
@@ -165,6 +162,7 @@ pub fn main() !void {
     try loop.register(server.handler());
     try loop.register(memory_dumper.handler());
     try loop.register(input_handler.handler());
+    try loop.register(try render_backend.makeHandler(root_alloc.arena(), &renderer));
 
     while (true) {
         scratch.reset();
