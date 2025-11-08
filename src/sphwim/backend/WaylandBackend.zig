@@ -97,7 +97,7 @@ fn pollError(self: *WaylandRenderBackend, renderer: *rendering.Renderer, composi
     var input_event_it = self.window.inputEvents();
     while (input_event_it.next()) |event| switch (event.*) {
         .pointer_movement => |pos| compositor_state.notifyCursorPosition(pos.x, pos.y),
-        .mouse1_down => compositor_state.notifyMouse1Down(),
+        .mouse1_down => try compositor_state.notifyMouse1Down(),
         .mouse1_up => compositor_state.notifyMouse1Up(),
     };
 

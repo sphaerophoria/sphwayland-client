@@ -55,6 +55,7 @@ const window_border_color = sphtud.math.Vec3{
 
 pub const Renderer = struct {
     frame_gl_alloc: *sphtud.render.GlAlloc,
+    scratch: sphtud.alloc.LinearAllocator,
 
     egl_ctx: *system_gl.EglContext,
     gbm_ctx: *system_gl.GbmContext,
@@ -109,6 +110,7 @@ pub const Renderer = struct {
 
         return .{
             .frame_gl_alloc = try gl_alloc.makeSubAlloc(alloc),
+            .scratch = scratch,
             .last_render_time = try std.time.Instant.now(),
             .compositor_state = compositor_state,
             .egl_ctx = egl_ctx,
@@ -127,6 +129,9 @@ pub const Renderer = struct {
     }
 
     pub fn render(self: *Renderer) !?system_gl.GbmContext.Buffer {
+        const cp = self.scratch.checkpoint();
+        defer self.scratch.restore(cp);
+
         const now = try std.time.Instant.now();
         defer self.last_render_time = now;
 
@@ -145,16 +150,17 @@ pub const Renderer = struct {
 
         const num_renderables = renderables.storage.count();
 
-        var renderable_it = renderables.storage.iter();
-        var depth: usize = 0;
-        while (renderable_it.next()) |item| {
-            defer depth += 1;
-            self.renderWindowSurface(item.val.*, depth, num_renderables) catch |e| {
+        const renderables_sorted = try self.compositor_state.renderables.getSortedHandles(self.scratch.allocator());
+
+        for (renderables_sorted, 0..) |handle, depth| {
+            std.debug.print("Rendering {d}\n", .{handle.inner});
+            const renderable = renderables.storage.get(handle);
+            self.renderWindowSurface(renderable.*, depth, num_renderables) catch |e| {
                 logger.warn("failed to import texture {t}, skipping window", .{e});
                 continue;
             };
 
-            const window_border = geometry.WindowBorder.fromRenderable(item.val.*);
+            const window_border = geometry.WindowBorder.fromRenderable(renderable.*);
 
             self.renderWindowTrim(window_border.titleQuad(), depth, num_renderables);
             self.renderWindowTrim(window_border.windowTrim(), depth, num_renderables);

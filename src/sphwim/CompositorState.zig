@@ -87,6 +87,7 @@ pub fn pushRenderable(
         },
         .cx = @intCast(self.compositor_res.width / 2),
         .cy = @intCast(self.compositor_res.height / 2),
+        .order = self.renderables.storage.count() - 1,
         .buffer = buffer,
     };
 
@@ -130,25 +131,67 @@ pub fn notifyMouse1Up(self: *CompositorState) void {
     self.drag_state = .none;
 }
 
-pub fn notifyMouse1Down(self: *CompositorState) void {
-    var it = self.renderables.storage.iter();
-    while (it.next()) |renderable| {
-        const window_border = geometry.WindowBorder.fromRenderable(renderable.val.*);
-        const cursor_x: i32 = @intFromFloat(self.cursor_pos.x);
-        const cursor_y: i32 = @intFromFloat(self.cursor_pos.y);
-        if (window_border.titleQuad().contains(cursor_x, cursor_y)) {
-            self.drag_state = .{
-                .moving_window = .{
-                    .last = self.cursor_pos,
-                    .id = renderable.handle,
-                },
-            };
+const WindowFgResult = struct {
+    location: geometry.WindowBorder.Location,
+    handle: Renderables.Handle,
+};
 
-            break;
-        } else if (window_border.windowTrim().contains(cursor_x, cursor_y)) {
-            break;
+fn moveToFront(self: *CompositorState, handle: Renderables.Handle) void {
+    var it = self.renderables.storage.iter();
+    const to_move = self.renderables.storage.get(handle);
+    const order = to_move.order;
+    while (it.next()) |renderable| {
+        if (renderable.val.order > order) {
+            renderable.val.order -= 1;
         }
     }
+    to_move.order = self.renderables.storage.count() - 1;
+}
+
+fn findClickedWindow(self: *CompositorState) !?WindowFgResult {
+    const cp = self.scratch.checkpoint();
+    defer self.scratch.restore(cp);
+
+    const handles = try self.renderables.getSortedHandles(self.scratch.allocator());
+    for (handles) |handle| {
+        const renderable = self.renderables.storage.get(handle);
+        const window_border = geometry.WindowBorder.fromRenderable(renderable.*);
+        const cursor_x: i32 = @intFromFloat(self.cursor_pos.x);
+        const cursor_y: i32 = @intFromFloat(self.cursor_pos.y);
+
+        if (window_border.titleQuad().contains(cursor_x, cursor_y)) {
+            return .{
+                .location = .titlebar,
+                .handle = handle,
+            };
+        }
+
+        if (window_border.windowTrim().contains(cursor_x, cursor_y)) {
+            return .{
+                .location = .surface,
+                .handle = handle,
+            };
+        }
+    }
+
+    return null;
+}
+
+pub fn notifyMouse1Down(self: *CompositorState) !void {
+    const res = (try self.findClickedWindow()) orelse return;
+    switch (res.location) {
+        .titlebar => {
+            self.drag_state = .{
+                .moving_window = .{
+                    .id = res.handle,
+                    .last = self.cursor_pos,
+                },
+            };
+        },
+        .surface => {},
+    }
+
+    self.moveToFront(res.handle);
 }
 
 pub const SourceInfo = struct {
@@ -161,6 +204,8 @@ pub const Renderable = struct {
     source_info: SourceInfo,
     cx: i32,
     cy: i32,
+    // Largest means on top
+    order: usize,
     buffer: rendering.RenderBuffer,
 };
 
@@ -177,13 +222,17 @@ pub const Renderables = struct {
 
     pub fn init(alloc: *sphtud.alloc.Sphalloc, scratch: sphtud.alloc.LinearAllocator, random: std.Random) !Renderables {
         const expansion_alloc = alloc.expansion();
+
+        const typical_num_windows = 100;
+        const max_num_windows = 10000;
+
         return .{
             .expansion_alloc = expansion_alloc,
             .storage = try .init(
                 alloc.arena(),
                 expansion_alloc,
-                100,
-                10000,
+                typical_num_windows,
+                max_num_windows,
             ),
             .debug = if (builtin.mode == .Debug) .{
                 .scratch = scratch,
@@ -196,6 +245,18 @@ pub const Renderables = struct {
         const item = self.storage.get(handle);
         item.source_info.buffer_id = new_buffer_id;
         item.buffer = new_buffer;
+    }
+
+    pub fn getSortedHandles(self: *Renderables, alloc: std.mem.Allocator) ![]Handle {
+        const num_renderables = self.storage.count();
+        const renderables_sorted = try alloc.alloc(CompositorState.Renderables.Handle, num_renderables);
+
+        var renderable_it = self.storage.iter();
+        while (renderable_it.next()) |item| {
+            renderables_sorted[num_renderables - item.val.order - 1] = item.handle;
+        }
+
+        return renderables_sorted;
     }
 
     const StorageMoveCtx = struct {
