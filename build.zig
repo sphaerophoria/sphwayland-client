@@ -154,6 +154,18 @@ const Builder = struct {
         return sphwindow;
     }
 
+    pub fn makeWlWaiter(self: Builder, wlio: *std.Build.Module, bindings: *std.Build.Module, wlclient: *std.Build.Module) !*std.Build.Step.Compile {
+        const exe = self.b.addExecutable(.{ .name = "wait_for_wl", .root_module = self.b.createModule(.{
+            .root_source_file = self.b.path("src/wl_waiter.zig"),
+            .target = self.target,
+        }) });
+        exe.root_module.addImport("wlio", wlio);
+        exe.root_module.addIncludePath(self.b.path("src"));
+        exe.root_module.addImport("wl_bindings", bindings);
+        exe.root_module.addImport("wlclient", wlclient);
+        return exe;
+    }
+
     pub fn makeWindowExample(self: Builder, sphwindow: *std.Build.Module) !*std.Build.Step.Compile {
         const gl_bindings_translate_c = try self.translateCFixed("src/example/gl.h");
         const gl_bindings = gl_bindings_translate_c.createModule();
@@ -259,6 +271,7 @@ pub fn build(b: *std.Build) !void {
     const wlclient = builder.makeWlClient(wlio_mod, wl_cmsg);
     const system_gl_bindings = try builder.makeSystemGlBindings();
     const sphwindow = try builder.makeWindow(wlio_mod, client_bindings, wlclient, system_gl_bindings);
+    const wait_for_wl = try builder.makeWlWaiter(wlio_mod, client_bindings, wlclient);
     const example = try builder.makeWindowExample(sphwindow);
 
     const sphtud = builder.importSphtud();
@@ -269,9 +282,11 @@ pub fn build(b: *std.Build) !void {
         b.getInstallStep().dependOn(&example.step);
         b.getInstallStep().dependOn(&wm.step);
         b.getInstallStep().dependOn(&wlgen.step);
+        b.getInstallStep().dependOn(&wait_for_wl.step);
     } else {
         b.installArtifact(example);
         b.installArtifact(wm);
         b.installArtifact(wlgen);
+        b.installArtifact(wait_for_wl);
     }
 }
