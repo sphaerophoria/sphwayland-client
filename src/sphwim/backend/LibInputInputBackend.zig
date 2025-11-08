@@ -107,7 +107,7 @@ fn pollError(self: *LibInputInputBackend) anyerror!void {
 
                 switch (buttonWithState(button, state)) {
                     buttonWithState(system.BTN_LEFT, system.LIBINPUT_BUTTON_STATE_PRESSED) => {
-                        self.compositor_state.notifyMouse1Down();
+                        try self.compositor_state.notifyMouse1Down();
                     },
                     buttonWithState(system.BTN_LEFT, system.LIBINPUT_BUTTON_STATE_RELEASED) => {
                         self.compositor_state.notifyMouse1Up();

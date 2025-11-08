@@ -112,26 +112,57 @@ pub fn notifyMouse1Up(self: *CompositorState) void {
     self.drag_state = .none;
 }
 
-pub fn notifyMouse1Down(self: *CompositorState) void {
-    for (0..self.renderables.count()) |idx| {
-        const handle = Renderables.Handle.fromIdx(idx);
-        const renderable = self.renderables.get(handle);
+const WindowFgResult = struct {
+    location: geometry.WindowBorder.Location,
+    handle: Renderables.Handle,
+};
+
+fn moveToFront(self: *CompositorState, handle: Renderables.Handle) void {
+    self.renderables.moveToEnd(handle);
+    self.healRenderableReferences(handle.inner, self.renderables.count(), .{ .rotation = -1 });
+}
+
+fn findClickedWindow(self: *CompositorState) !?WindowFgResult {
+    var it = self.renderables.iter();
+    while (it.next()) {
+        const renderable = it.get();
         const window_border = geometry.WindowBorder.fromRenderable(renderable);
         const cursor_x: i32 = @intFromFloat(self.cursor_pos.x);
         const cursor_y: i32 = @intFromFloat(self.cursor_pos.y);
-        if (window_border.titleQuad().contains(cursor_x, cursor_y)) {
-            self.drag_state = .{
-                .moving_window = .{
-                    .last = self.cursor_pos,
-                    .id = handle,
-                },
-            };
 
-            break;
-        } else if (window_border.windowTrim().contains(cursor_x, cursor_y)) {
-            break;
+        if (window_border.titleQuad().contains(cursor_x, cursor_y)) {
+            return .{
+                .location = .titlebar,
+                .handle = it.handle(),
+            };
+        }
+
+        if (window_border.windowTrim().contains(cursor_x, cursor_y)) {
+            return .{
+                .location = .surface,
+                .handle = it.handle(),
+            };
         }
     }
+
+    return null;
+}
+
+pub fn notifyMouse1Down(self: *CompositorState) !void {
+    const res = (try self.findClickedWindow()) orelse return;
+    switch (res.location) {
+        .titlebar => {
+            self.drag_state = .{
+                .moving_window = .{
+                    .id = res.handle,
+                    .last = self.cursor_pos,
+                },
+            };
+        },
+        .surface => {},
+    }
+
+    self.moveToFront(res.handle);
 }
 
 pub const SourceInfo = struct {
@@ -256,6 +287,38 @@ pub const Renderables = struct {
         return .{ .inner = try self.storage.addOne(self.expansion_alloc.alloc) };
     }
 
+    const Iter = struct {
+        idx: usize,
+        storage: std.MultiArrayList(Renderable).Slice,
+
+        pub fn next(self: *Iter) bool {
+            if (self.idx == 0) {
+                return false;
+            }
+            self.idx -= 1;
+            return true;
+        }
+
+        pub fn item(self: Iter, comptime field: std.MultiArrayList(Renderable).Field) *@FieldType(Renderable, @tagName(field)) {
+            self.storage.items(field)[self.idx];
+        }
+
+        pub fn get(self: Iter) Renderable {
+            return self.storage.get(self.idx);
+        }
+
+        pub fn handle(self: Iter) Handle {
+            return .fromIdx(self.idx);
+        }
+    };
+
+    pub fn iter(self: *Renderables) Iter {
+        return .{
+            .idx = self.storage.len,
+            .storage = self.storage.slice(),
+        };
+    }
+
     pub fn set(self: *Renderables, handle: Handle, renderable: Renderable) void {
         self.storage.set(handle.inner, renderable);
     }
@@ -301,6 +364,15 @@ pub const Renderables = struct {
             return self.inner;
         }
     };
+
+    pub fn moveToEnd(self: *Renderables, handle: Handle) void {
+        const multi_slice = self.storage.slice().subslice(handle.inner, self.storage.len - handle.inner);
+        inline for (std.meta.fields(Renderable)) |field| {
+            const field_tag = comptime std.meta.stringToEnum(std.MultiArrayList(Renderable).Field, field.name) orelse unreachable;
+            const slice = multi_slice.items(field_tag);
+            std.mem.rotate(field.type, slice, 1);
+        }
+    }
 };
 
 fn asf32(in: anytype) f32 {

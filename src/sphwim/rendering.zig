@@ -145,12 +145,13 @@ pub const Renderer = struct {
 
         const num_renderables = renderables.count();
 
-        var depth: usize = 0;
-        for (0..renderables.count()) |idx| {
-            const handle = CompositorState.Renderables.Handle.fromIdx(idx);
-            const renderable = renderables.get(handle);
+        var renderable_it = self.compositor_state.renderables.iter();
 
+        var depth: usize = 0;
+        while (renderable_it.next()) {
             defer depth += 1;
+
+            const renderable = renderable_it.get();
             self.renderWindowSurface(renderable, depth, num_renderables) catch |e| {
                 logger.warn("failed to import texture {t}, skipping window", .{e});
                 continue;

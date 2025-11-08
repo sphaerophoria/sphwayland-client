@@ -43,6 +43,11 @@ pub const WindowBorder = struct {
     surface_width: u31,
     surface_height: u31,
 
+    pub const Location = enum {
+        titlebar,
+        surface,
+    };
+
     pub fn fromRenderable(renderable: CompositorState.Renderable) WindowBorder {
         return .{
             // Windows don't move yet
