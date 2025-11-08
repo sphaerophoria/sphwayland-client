@@ -91,6 +91,8 @@ pub fn initializeGlParams() void {
     gl.glDebugMessageCallback(debugCallback, null);
     gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA);
     gl.glEnable(gl.GL_BLEND);
+    gl.glEnable(gl.GL_DEPTH_TEST);
+    gl.glDepthFunc(gl.GL_LESS);
 }
 
 pub fn main() !void {
@@ -129,6 +131,7 @@ pub fn main() !void {
     defer gl_alloc.deinit();
 
     const image_renderer = try sphtud.render.xyuvt_program.ImageRenderer.init(&gl_alloc, .rgba);
+    const solid_color_renderer = try sphtud.render.xyt_program.solidColorProgram(&gl_alloc);
 
     var renderer = try rendering.Renderer.init(
         &root_alloc,
@@ -138,6 +141,7 @@ pub fn main() !void {
         &gbm_context,
         &compositor_state,
         image_renderer,
+        solid_color_renderer,
     );
 
     var loop = try sphtud.event.LoopSphalloc.init(

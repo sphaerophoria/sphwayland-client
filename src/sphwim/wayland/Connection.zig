@@ -528,7 +528,7 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
                             next_buf.buf_id,
                         );
                     } else {
-                        surface.committed_buffer_handle = try self.compositor_state.renderables.push(
+                        surface.committed_buffer_handle = try self.compositor_state.pushRenderable(
                             self,
                             wl_surface_id,
                             next_buf.render_buffer,

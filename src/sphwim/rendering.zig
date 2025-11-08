@@ -3,6 +3,7 @@ const sphtud = @import("sphtud");
 const wayland = @import("wayland.zig");
 const FdPool = @import("FdPool.zig");
 const CompositorState = @import("CompositorState.zig");
+const geometry = @import("geometry.zig");
 const system_gl = @import("system_gl.zig");
 const gl = sphtud.render.gl;
 const cursor_img = @import("cursor.zig");
@@ -46,6 +47,12 @@ fn asf32(in: anytype) f32 {
     return @floatFromInt(in);
 }
 
+const window_border_color = sphtud.math.Vec3{
+    41.0 / 255.0,
+    36.0 / 255.0,
+    45.0 / 255.0,
+};
+
 pub const Renderer = struct {
     frame_gl_alloc: *sphtud.render.GlAlloc,
 
@@ -54,6 +61,9 @@ pub const Renderer = struct {
 
     compositor_state: *CompositorState,
     image_renderer: sphtud.render.xyuvt_program.ImageRenderer,
+
+    solid_color_renderer: sphtud.render.xyt_program.SolidColorProgram,
+    fullscreen_quad: sphtud.render.xyt_program.RenderSource,
 
     last_render_time: std.time.Instant,
 
@@ -73,6 +83,7 @@ pub const Renderer = struct {
         gbm_ctx: *system_gl.GbmContext,
         compositor_state: *CompositorState,
         image_renderer: sphtud.render.xyuvt_program.ImageRenderer,
+        solid_color_renderer: sphtud.render.xyt_program.SolidColorProgram,
     ) !Renderer {
         const cp = scratch.checkpoint();
         defer scratch.restore(cp);
@@ -84,6 +95,18 @@ pub const Renderer = struct {
             cursor_img.width,
         );
 
+        const fullscreen_quad_buf = try sphtud.render.xyt_program.Buffer.init(gl_alloc, &.{
+            .{ .vPos = .{ -1.0, -1.0 } },
+            .{ .vPos = .{ -1.0, 1.0 } },
+            .{ .vPos = .{ 1.0, 1.0 } },
+
+            .{ .vPos = .{ -1.0, -1.0 } },
+            .{ .vPos = .{ 1.0, 1.0 } },
+            .{ .vPos = .{ 1.0, -1.0 } },
+        });
+        var fullscreen_quad_render_source = try sphtud.render.xyt_program.RenderSource.init(gl_alloc);
+        fullscreen_quad_render_source.bindData(solid_color_renderer.handle(), fullscreen_quad_buf);
+
         return .{
             .frame_gl_alloc = try gl_alloc.makeSubAlloc(alloc),
             .last_render_time = try std.time.Instant.now(),
@@ -92,6 +115,8 @@ pub const Renderer = struct {
             .gbm_ctx = gbm_ctx,
             .render_in_progress = false,
             .image_renderer = image_renderer,
+            .solid_color_renderer = solid_color_renderer,
+            .fullscreen_quad = fullscreen_quad_render_source,
             .backend_rendering_buf = null,
             .cursor_tex = cursor_tex,
         };
@@ -110,7 +135,8 @@ pub const Renderer = struct {
 
         const background_red = @abs(self.background_animation_state - 1.0);
         gl.glClearColor(background_red, 0.0, 0.0, 1.0);
-        gl.glClear(gl.GL_COLOR_BUFFER_BIT);
+        gl.glClearDepth(std.math.inf(f32));
+        gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT);
         self.background_animation_state = @mod(self.background_animation_state + delta / 4.0, 2.0);
 
         const renderables = &self.compositor_state.renderables;
@@ -119,19 +145,15 @@ pub const Renderer = struct {
 
         var renderable_it = renderables.storage.iter();
         while (renderable_it.next()) |item| {
-            const buffer = item.val.buffer;
-            const texture = importTexture(self.frame_gl_alloc, self.egl_ctx, buffer) catch |e| {
+            self.renderWindowSurface(item.val.*) catch |e| {
                 logger.warn("failed to import texture {t}, skipping window", .{e});
                 continue;
             };
 
-            // HACK: If we read the DRM file descriptor directly into DRM
-            // scanout it is the right way up on our screen. When we import as
-            // a texture it's upside down according to glReadPixels (first
-            // pixel read is top left of image). Just flip the image in our
-            // transform for now
-            const transform = sphtud.math.Transform.scale(0.5, -0.5);
-            self.image_renderer.renderTexture(texture, transform);
+            const window_border = geometry.WindowBorder.fromRenderable(item.val.*);
+
+            self.renderWindowTrim(window_border.titleQuad());
+            self.renderWindowTrim(window_border.windowTrim());
         }
 
         self.renderCursor();
@@ -144,6 +166,28 @@ pub const Renderer = struct {
         logger.debug("rendered after {d}ms", .{now.since(self.last_render_time) / std.time.ns_per_ms});
 
         return front_buf;
+    }
+
+    fn renderWindowSurface(self: *Renderer, renderable: CompositorState.Renderable) !void {
+        const buffer = renderable.buffer;
+        const texture = try importTexture(self.frame_gl_alloc, self.egl_ctx, buffer);
+
+        const transform = quadTransform(.{
+            .cx = renderable.cx,
+            .cy = renderable.cy,
+            .width = @intCast(renderable.buffer.width),
+            .height = @intCast(renderable.buffer.height),
+        }, self.compositor_state.compositor_res);
+        self.image_renderer.renderTextureAtDepth(texture, transform, 0);
+    }
+
+    fn renderWindowTrim(self: *Renderer, quad: geometry.PixelQuad) void {
+        const transform = quadTransform(quad, self.compositor_state.compositor_res);
+        self.solid_color_renderer.render(self.fullscreen_quad, .{
+            .color = window_border_color,
+            .transform = transform.inner,
+            .depth = 0.1,
+        });
     }
 
     fn renderCursor(self: *Renderer) void {
@@ -166,9 +210,25 @@ pub const Renderer = struct {
             -1.0 + self.compositor_state.cursor_pos.x / half_width,
             1.0 - self.compositor_state.cursor_pos.y / half_height,
         ));
-        self.image_renderer.renderTexture(self.cursor_tex, transform);
+        self.image_renderer.renderTextureAtDepth(self.cursor_tex, transform, -1.0);
     }
 };
+
+fn pxToNorm(px: i32, axis_size: u32) f32 {
+    var clip: f32 = @floatFromInt(px);
+    clip /= @floatFromInt(axis_size);
+    return clip;
+}
+
+fn pxToClip(px: i32, axis_size: u32) f32 {
+    const center: i32 = @intCast(axis_size / 2);
+    return pxToNorm(px - center, axis_size) * 2.0;
+}
+
+fn quadTransform(quad: geometry.PixelQuad, compositor_res: Resolution) sphtud.math.Transform {
+    return sphtud.math.Transform.scale(pxToNorm(quad.width, compositor_res.width), -pxToNorm(quad.height, compositor_res.height))
+        .then(.translate(pxToClip(quad.cx, compositor_res.width), -pxToClip(quad.cy, compositor_res.height)));
+}
 
 fn importTexture(gl_alloc: *sphtud.render.GlAlloc, egl_ctx: *const system_gl.EglContext, buffer: RenderBuffer) !sphtud.render.Texture {
     const egl_image = try egl_ctx.importDmaBuf(buffer);

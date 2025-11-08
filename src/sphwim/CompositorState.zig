@@ -47,10 +47,40 @@ pub fn notifyCursorPosition(self: *CompositorState, x: f32, y: f32) void {
     self.cursor_pos.y = std.math.clamp(y, 0, asf32(self.compositor_res.height));
 }
 
+pub fn pushRenderable(
+    self: *CompositorState,
+    connection: *wayland.Connection,
+    surface: wayland.Connection.WlSurfaceId,
+    buffer: rendering.RenderBuffer,
+    buffer_id: wayland.Connection.WlBufferId,
+) !Renderables.Handle {
+    const item = try self.renderables.storage.acquire(self.renderables.expansion_alloc);
+
+    item.val.* = .{
+        .source_info = .{
+            .connection = connection,
+            .surface = surface,
+            .buffer_id = buffer_id,
+        },
+        .cx = @intCast(self.compositor_res.width / 2),
+        .cy = @intCast(self.compositor_res.height / 2),
+        .buffer = buffer,
+    };
+
+    return item.handle;
+}
+
 pub const SourceInfo = struct {
     connection: *wayland.Connection,
     surface: wayland.Connection.WlSurfaceId,
     buffer_id: wayland.Connection.WlBufferId,
+};
+
+pub const Renderable = struct {
+    source_info: SourceInfo,
+    cx: i32,
+    cy: i32,
+    buffer: rendering.RenderBuffer,
 };
 
 // Ties wayland surfaces that are ready to their renderable state
@@ -63,11 +93,6 @@ pub const Renderables = struct {
         scratch: sphtud.alloc.LinearAllocator,
         random: std.Random,
     } else void;
-
-    pub const Renderable = struct {
-        source_info: SourceInfo,
-        buffer: rendering.RenderBuffer,
-    };
 
     pub fn init(alloc: *sphtud.alloc.Sphalloc, scratch: sphtud.alloc.LinearAllocator, random: std.Random) !Renderables {
         return .{
@@ -88,27 +113,6 @@ pub const Renderables = struct {
         const item = self.storage.get(handle);
         item.source_info.buffer_id = new_buffer_id;
         item.buffer = new_buffer;
-    }
-
-    pub fn push(
-        self: *Renderables,
-        connection: *wayland.Connection,
-        surface: wayland.Connection.WlSurfaceId,
-        buffer: rendering.RenderBuffer,
-        buffer_id: wayland.Connection.WlBufferId,
-    ) !Handle {
-        const item = try self.storage.acquire(self.expansion_alloc);
-
-        item.val.* = .{
-            .source_info = .{
-                .connection = connection,
-                .surface = surface,
-                .buffer_id = buffer_id,
-            },
-            .buffer = buffer,
-        };
-
-        return item.handle;
     }
 
     pub fn remove(self: *Renderables, handle: Renderables.Handle) void {
