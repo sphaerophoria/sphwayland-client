@@ -6,22 +6,31 @@ pub const PixelQuad = struct {
     width: u31,
     height: u31,
 
-    fn left(self: PixelQuad) i32 {
+    pub fn contains(self: PixelQuad, x: i32, y: i32) bool {
+        return between(x, self.left(), self.right()) and
+            between(y, self.top(), self.bottom());
+    }
+
+    pub fn left(self: PixelQuad) i32 {
         return self.cx - self.width / 2;
     }
 
-    fn right(self: PixelQuad) i32 {
+    pub fn right(self: PixelQuad) i32 {
         return self.cx + self.width / 2;
     }
 
-    fn top(self: PixelQuad) i32 {
+    pub fn top(self: PixelQuad) i32 {
         return self.cy - self.height / 2;
     }
 
-    fn bottom(self: PixelQuad) i32 {
+    pub fn bottom(self: PixelQuad) i32 {
         return self.cy + self.height / 2;
     }
 };
+
+fn between(val: i32, a: i32, b: i32) bool {
+    return val >= a and val <= b;
+}
 
 pub const WindowBorder = struct {
     const titlebar_height = 30;

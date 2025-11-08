@@ -260,7 +260,7 @@ fn close(ctx: ?*anyopaque) void {
     var surface_it = self.wl_surfaces.iter();
     while (surface_it.next()) |surface| {
         if (surface.val.committed_buffer_handle) |h| {
-            self.compositor_state.renderables.remove(h);
+            self.compositor_state.removeRenderable(h);
         }
     }
 
@@ -945,7 +945,7 @@ const Surface = struct {
         }
 
         if (self.committed_buffer_handle) |handle| {
-            compositor_state.renderables.remove(handle);
+            compositor_state.removeRenderable(handle);
         }
     }
 };

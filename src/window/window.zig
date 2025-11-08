@@ -2,6 +2,9 @@ const std = @import("std");
 const wlclient = @import("wlclient");
 const wlb = @import("wl_bindings");
 const system = @import("system.zig");
+const c = @cImport({
+    @cInclude("linux/input-event-codes.h");
+});
 
 const BoundInterfaces = struct {
     compositor: wlb.WlCompositor,
@@ -217,12 +220,17 @@ pub const Window = struct {
 
     wants_frame: bool = false,
 
-    input_events: struct {
-        pointer_pos: ?PointerPos = null,
-    } = .{},
+    alloc: std.mem.Allocator,
+    input_events: std.ArrayList(InputEvent) = .{},
+    pending_input_events: std.ArrayList(InputEvent) = .{},
 
-    pending_pointer: ?PointerPos = null,
     preferred_gpu: ?u64,
+
+    const InputEvent = union(enum) {
+        pointer_movement: PointerPos,
+        mouse1_down,
+        mouse1_up,
+    };
 
     const FormatTableItem = packed struct {
         format: u32,
@@ -231,7 +239,7 @@ pub const Window = struct {
     };
 
     const FormatModifierPair = struct { format: u32, modifier: u64 };
-    const PointerPos = struct {
+    pub const PointerPos = struct {
         x: f32,
         y: f32,
     };
@@ -296,6 +304,10 @@ pub const Window = struct {
             .frame_callback = frame_callback,
             .client = client,
             .preferred_gpu = preferred_gpu,
+
+            .alloc = alloc,
+            .input_events = .{},
+            .pending_input_events = .{},
         };
         errdefer ret.deinit();
 
@@ -309,6 +321,8 @@ pub const Window = struct {
 
     pub fn deinit(self: *Window) void {
         self.client.deinit();
+        self.input_events.deinit(self.alloc);
+        self.pending_input_events.deinit(self.alloc);
     }
 
     // By default users will use DefaultGlCtx above, but some users of this
@@ -478,13 +492,25 @@ pub const Window = struct {
             },
             .wl_pointer => |parsed| switch (parsed) {
                 .frame => {
-                    self.input_events.pointer_pos = self.pending_pointer;
+                    try self.input_events.appendSlice(self.alloc, self.pending_input_events.items);
+                    self.pending_input_events.clearRetainingCapacity();
                 },
                 .motion => |params| {
-                    self.pending_pointer = .{
+                    const pointer_update = InputEvent{ .pointer_movement = .{
                         .x = params.surface_x.tof32(),
                         .y = params.surface_y.tof32(),
-                    };
+                    } };
+                    try self.pending_input_events.append(self.alloc, pointer_update);
+                },
+                .button => |params| {
+                    if (params.button == c.BTN_LEFT) {
+                        const input_event: InputEvent = switch (params.state) {
+                            0 => InputEvent.mouse1_up,
+                            1 => InputEvent.mouse1_down,
+                            else => unreachable,
+                        };
+                        try self.pending_input_events.append(self.alloc, input_event);
+                    }
                 },
                 else => wlclient.logUnusedEvent(event.event),
             },
@@ -493,11 +519,11 @@ pub const Window = struct {
         return false;
     }
 
-    pub fn pointerUpdate(self: Window) ?PointerPos {
-        return self.input_events.pointer_pos;
+    pub fn inputEvents(self: Window) []InputEvent {
+        return self.input_events.items;
     }
 
     fn clearInputEvents(self: *Window) void {
-        self.input_events.pointer_pos = null;
+        self.input_events = .{};
     }
 };

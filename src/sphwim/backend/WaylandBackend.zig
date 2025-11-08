@@ -94,9 +94,11 @@ fn pollError(self: *WaylandRenderBackend, renderer: *rendering.Renderer, composi
         self.system_running.* = false;
     }
 
-    if (self.window.pointerUpdate()) |update| {
-        compositor_state.notifyCursorPosition(update.x, update.y);
-    }
+    for (self.window.inputEvents()) |event| switch (event) {
+        .pointer_movement => |pos| compositor_state.notifyCursorPosition(pos.x, pos.y),
+        .mouse1_down => compositor_state.notifyMouse1Down(),
+        .mouse1_up => compositor_state.notifyMouse1Up(),
+    };
 
     if (!self.window.wantsFrame()) {
         return;

@@ -4,15 +4,25 @@ const wayland = @import("wayland.zig");
 const rendering = @import("rendering.zig");
 const FdPool = @import("FdPool.zig");
 const builtin = @import("builtin");
+const geometry = @import("geometry.zig");
 
 scratch: *sphtud.alloc.BufAllocator,
 compositor_res: rendering.Resolution,
+drag_state: DragState,
 cursor_pos: CursorPos,
 renderables: Renderables,
 
 const CursorPos = struct {
     x: f32,
     y: f32,
+};
+
+const DragState = union(enum) {
+    moving_window: struct {
+        id: Renderables.Handle,
+        last: CursorPos,
+    },
+    none,
 };
 
 const CompositorState = @This();
@@ -25,6 +35,7 @@ pub fn init(alloc: *sphtud.alloc.Sphalloc, scratch: *sphtud.alloc.BufAllocator, 
             .x = @floatFromInt(current_res.width / 2),
             .y = @floatFromInt(current_res.height / 2),
         },
+        .drag_state = .none,
         .renderables = try .init(alloc, scratch.linear(), random),
     };
 }
@@ -38,13 +49,25 @@ pub fn requestFrame(self: *CompositorState) !void {
 }
 
 pub fn notifyCursorMovement(self: *CompositorState, dx: f32, dy: f32) void {
-    self.cursor_pos.x = std.math.clamp(self.cursor_pos.x + dx, 0, asf32(self.compositor_res.width));
-    self.cursor_pos.y = std.math.clamp(self.cursor_pos.y + dy, 0, asf32(self.compositor_res.height));
+    self.notifyCursorPosition(
+        self.cursor_pos.x + dx,
+        self.cursor_pos.y + dy,
+    );
 }
 
 pub fn notifyCursorPosition(self: *CompositorState, x: f32, y: f32) void {
     self.cursor_pos.x = std.math.clamp(x, 0, asf32(self.compositor_res.width));
     self.cursor_pos.y = std.math.clamp(y, 0, asf32(self.compositor_res.height));
+
+    switch (self.drag_state) {
+        .moving_window => |*params| {
+            const renderable = self.renderables.storage.get(params.id);
+            renderable.cx += @intFromFloat(self.cursor_pos.x - params.last.x);
+            renderable.cy += @intFromFloat(self.cursor_pos.y - params.last.y);
+            params.last = self.cursor_pos;
+        },
+        .none => {},
+    }
 }
 
 pub fn pushRenderable(
@@ -68,6 +91,64 @@ pub fn pushRenderable(
     };
 
     return item.handle;
+}
+
+pub fn removeRenderable(self: *CompositorState, handle: Renderables.Handle) void {
+    switch (self.drag_state) {
+        .moving_window => |move_state| {
+            if (move_state.id.inner == handle.inner) {
+                self.drag_state = .none;
+            }
+        },
+        .none => {},
+    }
+
+    self.renderables.storage.release(self.renderables.expansion_alloc, handle);
+    const move_ctx = self.renderables.storageMoveCtx(&self.drag_state);
+    self.renderables.storage.defragIfDensityLow(self.renderables.expansion_alloc, 0.8, move_ctx);
+    self.renderables.storage.relciamMemory(self.renderables.expansion_alloc, move_ctx);
+
+    if (builtin.mode == .Debug) {
+        const cp = self.renderables.debug.scratch.checkpoint();
+        defer self.renderables.debug.scratch.restore(cp);
+
+        // Ensure that our move context is updating who he is supposed to
+        // update. If we scramble on every object removal it will force us
+        // to notice more often if something is wrong
+        self.renderables.storage.scramble(
+            self.renderables.expansion_alloc,
+            self.renderables.debug.scratch.allocator(),
+            self.renderables.debug.random,
+            move_ctx,
+        ) catch {
+            std.log.err("failed to scramble for testing", .{});
+        };
+    }
+}
+
+pub fn notifyMouse1Up(self: *CompositorState) void {
+    self.drag_state = .none;
+}
+
+pub fn notifyMouse1Down(self: *CompositorState) void {
+    var it = self.renderables.storage.iter();
+    while (it.next()) |renderable| {
+        const window_border = geometry.WindowBorder.fromRenderable(renderable.val.*);
+        const cursor_x: i32 = @intFromFloat(self.cursor_pos.x);
+        const cursor_y: i32 = @intFromFloat(self.cursor_pos.y);
+        if (window_border.titleQuad().contains(cursor_x, cursor_y)) {
+            self.drag_state = .{
+                .moving_window = .{
+                    .last = self.cursor_pos,
+                    .id = renderable.handle,
+                },
+            };
+
+            break;
+        } else if (window_border.windowTrim().contains(cursor_x, cursor_y)) {
+            break;
+        }
+    }
 }
 
 pub const SourceInfo = struct {
@@ -115,42 +196,29 @@ pub const Renderables = struct {
         item.buffer = new_buffer;
     }
 
-    pub fn remove(self: *Renderables, handle: Renderables.Handle) void {
-        self.storage.release(self.expansion_alloc, handle);
-        const move_ctx = self.storageMoveCtx();
-        self.storage.defragIfDensityLow(self.expansion_alloc, 0.8, move_ctx);
-        self.storage.relciamMemory(self.expansion_alloc, move_ctx);
-
-        if (builtin.mode == .Debug) {
-            const cp = self.debug.scratch.checkpoint();
-            defer self.debug.scratch.restore(cp);
-
-            // Ensure that our move context is updating who he is supposed to
-            // update. If we scramble on every object removal it will force us
-            // to notice more often if something is wrong
-            self.storage.scramble(
-                self.expansion_alloc,
-                self.debug.scratch.allocator(),
-                self.debug.random,
-                move_ctx,
-            ) catch {
-                std.log.err("failed to scramble for testing", .{});
-            };
-        }
-    }
-
     const StorageMoveCtx = struct {
         parent: *Renderables,
+        drag_state: *DragState,
 
-        pub fn notifyMoved(self: StorageMoveCtx, _: Handle, to: Handle) void {
+        pub fn notifyMoved(self: StorageMoveCtx, from: Handle, to: Handle) void {
+            switch (self.drag_state.*) {
+                .moving_window => |*move_state| {
+                    if (move_state.id.inner == from.inner) {
+                        move_state.id = to;
+                    }
+                },
+                .none => {},
+            }
+
             const moved_elem = self.parent.storage.get(to);
             moved_elem.source_info.connection.updateRenderableHandle(moved_elem.source_info.surface, to);
         }
     };
 
-    fn storageMoveCtx(self: *Renderables) StorageMoveCtx {
+    fn storageMoveCtx(self: *Renderables, drag_state: *DragState) StorageMoveCtx {
         return .{
             .parent = self,
+            .drag_state = drag_state,
         };
     }
 

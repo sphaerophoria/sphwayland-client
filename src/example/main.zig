@@ -45,8 +45,18 @@ pub fn main() !void {
 
     while (!(try window.service(&gl_ctx))) {
         // Only returns a position on frame()
-        if (window.pointerUpdate()) |pos| {
-            std.debug.print("Pointer at {any}\n", .{pos});
+        for (window.inputEvents()) |event| {
+            switch (event) {
+                .pointer_movement => |pos| {
+                    std.debug.print("Pointer at {any}\n", .{pos});
+                },
+                .mouse1_down => {
+                    std.debug.print("Mouse pressed\n", .{});
+                },
+                .mouse1_up => {
+                    std.debug.print("Mouse released\n", .{});
+                },
+            }
         }
 
         if (window.wantsFrame()) {

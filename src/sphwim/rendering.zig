@@ -143,17 +143,21 @@ pub const Renderer = struct {
 
         defer self.frame_gl_alloc.reset();
 
+        const num_renderables = renderables.storage.count();
+
         var renderable_it = renderables.storage.iter();
+        var depth: usize = 0;
         while (renderable_it.next()) |item| {
-            self.renderWindowSurface(item.val.*) catch |e| {
+            defer depth += 1;
+            self.renderWindowSurface(item.val.*, depth, num_renderables) catch |e| {
                 logger.warn("failed to import texture {t}, skipping window", .{e});
                 continue;
             };
 
             const window_border = geometry.WindowBorder.fromRenderable(item.val.*);
 
-            self.renderWindowTrim(window_border.titleQuad());
-            self.renderWindowTrim(window_border.windowTrim());
+            self.renderWindowTrim(window_border.titleQuad(), depth, num_renderables);
+            self.renderWindowTrim(window_border.windowTrim(), depth, num_renderables);
         }
 
         self.renderCursor();
@@ -168,7 +172,7 @@ pub const Renderer = struct {
         return front_buf;
     }
 
-    fn renderWindowSurface(self: *Renderer, renderable: CompositorState.Renderable) !void {
+    fn renderWindowSurface(self: *Renderer, renderable: CompositorState.Renderable, depth: usize, num_renderables: usize) !void {
         const buffer = renderable.buffer;
         const texture = try importTexture(self.frame_gl_alloc, self.egl_ctx, buffer);
 
@@ -178,15 +182,21 @@ pub const Renderer = struct {
             .width = @intCast(renderable.buffer.width),
             .height = @intCast(renderable.buffer.height),
         }, self.compositor_state.compositor_res);
-        self.image_renderer.renderTextureAtDepth(texture, transform, 0);
+
+        var depth_f: f32 = @floatFromInt(depth);
+        depth_f /= @floatFromInt(num_renderables);
+        self.image_renderer.renderTextureAtDepth(texture, transform, depth_f);
     }
 
-    fn renderWindowTrim(self: *Renderer, quad: geometry.PixelQuad) void {
+    fn renderWindowTrim(self: *Renderer, quad: geometry.PixelQuad, depth: usize, num_renderables: usize) void {
         const transform = quadTransform(quad, self.compositor_state.compositor_res);
+        var depth_f: f32 = @floatFromInt(depth);
+        depth_f += 0.1;
+        depth_f /= @floatFromInt(num_renderables);
         self.solid_color_renderer.render(self.fullscreen_quad, .{
             .color = window_border_color,
             .transform = transform.inner,
-            .depth = 0.1,
+            .depth = depth_f,
         });
     }
 
