@@ -48,14 +48,14 @@ pub fn requestFrame(self: *CompositorState) !void {
     }
 }
 
-pub fn notifyCursorMovement(self: *CompositorState, dx: f32, dy: f32) void {
-    self.notifyCursorPosition(
+pub fn notifyCursorMovement(self: *CompositorState, dx: f32, dy: f32) !void {
+    try self.notifyCursorPosition(
         self.cursor_pos.x + dx,
         self.cursor_pos.y + dy,
     );
 }
 
-pub fn notifyCursorPosition(self: *CompositorState, x: f32, y: f32) void {
+pub fn notifyCursorPosition(self: *CompositorState, x: f32, y: f32) !void {
     self.cursor_pos.x = std.math.clamp(x, 0, asf32(self.compositor_res.width));
     self.cursor_pos.y = std.math.clamp(y, 0, asf32(self.compositor_res.height));
 
@@ -66,7 +66,23 @@ pub fn notifyCursorPosition(self: *CompositorState, x: f32, y: f32) void {
             renderable.cy += @intFromFloat(self.cursor_pos.y - params.last.y);
             params.last = self.cursor_pos;
         },
-        .none => {},
+        .none => {
+            const cp = self.scratch.checkpoint();
+            defer self.scratch.restore(cp);
+
+            if (try self.findHoveredWindow()) |hovered| {
+                switch (hovered.location) {
+                    .surface => |pos| {
+                        std.debug.print("On surface at pos {any}\n", .{pos});
+                        const source_info = self.renderables.storage.get(hovered.handle).source_info;
+                        try source_info.connection.notifyCursorPosition(source_info.surface, pos.x, pos.y);
+                    },
+                    else => {
+                        std.debug.print("Not on any surface", .{});
+                    },
+                }
+            }
+        },
     }
 }
 
@@ -76,6 +92,7 @@ pub fn pushRenderable(
     surface: wayland.Connection.WlSurfaceId,
     buffer: rendering.RenderBuffer,
     buffer_id: wayland.Connection.WlBufferId,
+    window_id: wayland.Connection.XdgToplevelId,
 ) !Renderables.Handle {
     const item = try self.renderables.storage.acquire(self.renderables.expansion_alloc);
 
@@ -84,6 +101,7 @@ pub fn pushRenderable(
             .connection = connection,
             .surface = surface,
             .buffer_id = buffer_id,
+            .window = window_id,
         },
         .cx = @intCast(self.compositor_res.width / 2),
         .cy = @intCast(self.compositor_res.height / 2),
@@ -148,7 +166,7 @@ fn moveToFront(self: *CompositorState, handle: Renderables.Handle) void {
     to_move.order = self.renderables.storage.count() - 1;
 }
 
-fn findClickedWindow(self: *CompositorState) !?WindowFgResult {
+fn findHoveredWindow(self: *CompositorState) !?WindowFgResult {
     const cp = self.scratch.checkpoint();
     defer self.scratch.restore(cp);
 
@@ -159,16 +177,9 @@ fn findClickedWindow(self: *CompositorState) !?WindowFgResult {
         const cursor_x: i32 = @intFromFloat(self.cursor_pos.x);
         const cursor_y: i32 = @intFromFloat(self.cursor_pos.y);
 
-        if (window_border.titleQuad().contains(cursor_x, cursor_y)) {
+        if (window_border.contains(cursor_x, cursor_y)) |location| {
             return .{
-                .location = .titlebar,
-                .handle = handle,
-            };
-        }
-
-        if (window_border.windowTrim().contains(cursor_x, cursor_y)) {
-            return .{
-                .location = .surface,
+                .location = location,
                 .handle = handle,
             };
         }
@@ -178,7 +189,7 @@ fn findClickedWindow(self: *CompositorState) !?WindowFgResult {
 }
 
 pub fn notifyMouse1Down(self: *CompositorState) !void {
-    const res = (try self.findClickedWindow()) orelse return;
+    const res = (try self.findHoveredWindow()) orelse return;
     switch (res.location) {
         .titlebar => {
             self.drag_state = .{
@@ -187,6 +198,10 @@ pub fn notifyMouse1Down(self: *CompositorState) !void {
                     .last = self.cursor_pos,
                 },
             };
+        },
+        .close => {
+            const source_info = self.renderables.storage.get(res.handle).source_info;
+            try source_info.connection.closeWindow(source_info.window);
         },
         .surface => {},
     }
@@ -197,6 +212,7 @@ pub fn notifyMouse1Down(self: *CompositorState) !void {
 pub const SourceInfo = struct {
     connection: *wayland.Connection,
     surface: wayland.Connection.WlSurfaceId,
+    window: wayland.Connection.XdgToplevelId,
     buffer_id: wayland.Connection.WlBufferId,
 };
 

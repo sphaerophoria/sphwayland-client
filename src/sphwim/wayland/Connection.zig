@@ -33,6 +33,7 @@ gbm_context: *const system_gl.GbmContext,
 interface_registry: InterfaceRegistry,
 wl_surfaces: sphtud.util.AutoHashMap(WlSurfaceId, Surface),
 wl_buffers: sphtud.util.AutoHashMap(WlBufferId, *RefCountedRenderBuffer),
+wl_pointers: sphtud.util.AutoHashMap(WlPointerId, Pointer),
 zwp_params: sphtud.util.AutoHashMap(ZwpBufferParamsId, ?BufferParams),
 xdg_surfaces: sphtud.util.AutoHashMap(XdgSurfaceId, WlSurfaceId),
 windows: sphtud.util.AutoHashMap(XdgToplevelId, Window),
@@ -89,6 +90,8 @@ pub fn init(
         .gbm_context = gbm_context,
         .interface_registry = try .init(alloc),
         .wl_surfaces = try .init(alloc.arena(), alloc.expansion(), typical_surfaces, max_surfaces),
+        // FIXME: I don't know pick a sane number
+        .wl_pointers = try .init(alloc.arena(), alloc.expansion(), 4, 4),
         .xdg_surfaces = try .init(alloc.arena(), alloc.expansion(), typical_surfaces, max_surfaces),
         .windows = try .init(alloc.arena(), alloc.expansion(), typical_windows, max_windows),
         .wl_buffers = try .init(alloc.arena(), alloc.expansion(), typical_surfaces, max_surfaces),
@@ -122,6 +125,48 @@ pub fn requestFrame(self: *Connection, surface_id: WlSurfaceId) !void {
 
     var global = Bindings.WlDisplay{ .id = display_id };
     try global.deleteId(self.io_writer, .{ .id = callback_id });
+    try self.io_writer.flush();
+}
+
+pub fn closeWindow(self: *Connection, toplevel_id: XdgToplevelId) !void {
+    var toplevel_interface = Bindings.XdgToplevel{ .id = toplevel_id.inner };
+    try toplevel_interface.close(self.io_writer, .{});
+    try self.io_writer.flush();
+}
+
+pub fn notifyCursorPosition(self: *Connection, surface_id: WlSurfaceId, x: i32, y: i32) !void {
+    std.debug.print("Cursor pos time :) {d} pointers\n", .{self.wl_pointers.len});
+    var pointer_it = self.wl_pointers.iter();
+    while (pointer_it.next()) |item| {
+        var interface = Bindings.WlPointer{ .id = item.key.inner };
+        if (item.val.isInSurface(surface_id)) {
+            try interface.motion(self.io_writer, .{
+                // FIXME: lol
+                .time = 0,
+                .surface_x = wlio.WlFixed.fromi32(x),
+                .surface_y = wlio.WlFixed.fromi32(y),
+            });
+        } else {
+            if (item.val.current_surface) |to_leave| {
+                try interface.leave(self.io_writer, .{
+                    // FIXME: ?????
+                    .serial = item.val.serial,
+                    .surface = to_leave.inner,
+                });
+            }
+
+            // FIXME: i made this up
+            item.val.serial +%= 1;
+
+            try interface.enter(self.io_writer, .{
+                .serial = item.val.serial,
+                .surface = surface_id.inner,
+                .surface_x = wlio.WlFixed.fromi32(x),
+                .surface_y = wlio.WlFixed.fromi32(y),
+            });
+            item.val.current_surface = surface_id;
+        }
+    }
     try self.io_writer.flush();
 }
 
@@ -273,6 +318,7 @@ pub const XdgSurfaceId = struct { inner: u32 };
 pub const XdgToplevelId = struct { inner: u32 };
 pub const WlSurfaceId = struct { inner: u32 };
 pub const WlBufferId = struct { inner: u32 };
+pub const WlPointerId = struct { inner: u32 };
 pub const ZwpBufferParamsId = struct { inner: u32 };
 
 const RequestFormatter = struct {
@@ -390,6 +436,14 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
             .bind => |params| {
                 const interface: Bindings.WaylandInterfaceType = @enumFromInt(params.name);
                 try self.interface_registry.put(params.id, interface, diagnostics);
+
+                if (params.name == @intFromEnum(Bindings.WaylandInterfaceType.wl_seat)) {
+                    const wl_seat_interface = Bindings.WlSeat{ .id = params.id };
+                    try wl_seat_interface.capabilities(self.io_writer, .{
+                        // Advertising this causes crashes in glfw
+                        .capabilities = 0,
+                    });
+                }
             },
         },
         .wl_region => |parsed| switch (parsed) {
@@ -416,6 +470,14 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
                 logUnhandledRequest(object_id, req);
                 return;
             },
+        },
+        .wl_seat => |parsed| switch (parsed) {
+            .get_pointer => |params| {
+                const pointer_id = WlPointerId{ .inner = params.id };
+                try self.wl_pointers.put(pointer_id, .{});
+                try self.interface_registry.put(params.id, .wl_pointer, diagnostics);
+            },
+            else => logUnhandledRequest(object_id, req),
         },
         .wl_shm_pool => |parsed| switch (parsed) {
             .destroy => {
@@ -459,6 +521,7 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
 
                 const xdg_surface_id = XdgSurfaceId{ .inner = object_id };
                 const surface = try self.getXdgSurface(xdg_surface_id, .interface, diagnostics);
+                surface.toplevel_id = toplevel_id;
 
                 try self.emitXdgSurfaceConfigure(xdg_surface_id, surface);
             },
@@ -527,12 +590,14 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
                             next_buf.render_buffer,
                             next_buf.buf_id,
                         );
-                    } else {
+                    } else blk: {
+                        const toplevel_id = surface.toplevel_id orelse break :blk;
                         surface.committed_buffer_handle = try self.compositor_state.pushRenderable(
                             self,
                             wl_surface_id,
                             next_buf.render_buffer,
                             next_buf.buf_id,
+                            toplevel_id,
                         );
                     }
                 }
@@ -917,6 +982,7 @@ const Surface = struct {
 
     callback_id: ?u32 = null,
     outstanding_xdg_configure: ?u32 = null,
+    toplevel_id: ?XdgToplevelId = null,
 
     fn deinit(self: Surface, alloc: std.mem.Allocator, fd_pool: *FdPool, compositor_state: *CompositorState) void {
         if (self.pending_buffer) |buf| {
@@ -930,6 +996,17 @@ const Surface = struct {
         if (self.committed_buffer_handle) |handle| {
             compositor_state.removeRenderable(handle);
         }
+    }
+};
+
+const Pointer = struct {
+    current_surface: ?WlSurfaceId = null,
+    // FIXME: Dont' just make up what this is
+    serial: u32 = 0,
+
+    fn isInSurface(self: Pointer, surface: WlSurfaceId) bool {
+        const current_surface = self.current_surface orelse return false;
+        return current_surface.inner == surface.inner;
     }
 };
 

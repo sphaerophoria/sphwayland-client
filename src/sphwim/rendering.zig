@@ -53,6 +53,18 @@ const window_border_color = sphtud.math.Vec3{
     45.0 / 255.0,
 };
 
+const close_default_color = sphtud.math.Vec3{
+    100.0 / 255.0,
+    0.0,
+    0.0,
+};
+
+const close_hover_color = sphtud.math.Vec3{
+    130.0 / 255.0,
+    0.0,
+    0.0,
+};
+
 pub const Renderer = struct {
     frame_gl_alloc: *sphtud.render.GlAlloc,
     scratch: sphtud.alloc.LinearAllocator,
@@ -152,6 +164,9 @@ pub const Renderer = struct {
 
         const renderables_sorted = try self.compositor_state.renderables.getSortedHandles(self.scratch.allocator());
 
+        var hover_found: bool = false;
+        const cursor_x: i32 = @intFromFloat(self.compositor_state.cursor_pos.x);
+        const cursor_y: i32 = @intFromFloat(self.compositor_state.cursor_pos.y);
         for (renderables_sorted, 0..) |handle, depth| {
             std.debug.print("Rendering {d}\n", .{handle.inner});
             const renderable = renderables.storage.get(handle);
@@ -162,8 +177,18 @@ pub const Renderer = struct {
 
             const window_border = geometry.WindowBorder.fromRenderable(renderable.*);
 
-            self.renderWindowTrim(window_border.titleQuad(), depth, num_renderables);
-            self.renderWindowTrim(window_border.windowTrim(), depth, num_renderables);
+            var close_hovered = false;
+            if (!hover_found) {
+                if (window_border.contains(cursor_x, cursor_y)) |location| {
+                    close_hovered = location == .close;
+                    hover_found = true;
+                }
+            }
+
+            const close_color = if (close_hovered) close_hover_color else close_default_color;
+            self.renderSolidQuad(window_border.closeQuad(), close_color, depth, 1, num_renderables);
+            self.renderSolidQuad(window_border.titleQuad(), window_border_color, depth, 2, num_renderables);
+            self.renderSolidQuad(window_border.windowTrim(), window_border_color, depth, 2, num_renderables);
         }
 
         self.renderCursor();
@@ -194,13 +219,15 @@ pub const Renderer = struct {
         self.image_renderer.renderTextureAtDepth(texture, transform, depth_f);
     }
 
-    fn renderWindowTrim(self: *Renderer, quad: geometry.PixelQuad, depth: usize, num_renderables: usize) void {
+    fn renderSolidQuad(self: *Renderer, quad: geometry.PixelQuad, color: sphtud.math.Vec3, depth: usize, sub_order: f32, num_renderables: usize) void {
         const transform = quadTransform(quad, self.compositor_state.compositor_res);
         var depth_f: f32 = @floatFromInt(depth);
-        depth_f += 0.1;
+        const max_sub_order = 10.0;
+        std.debug.assert(sub_order < max_sub_order);
+        depth_f += sub_order / max_sub_order;
         depth_f /= @floatFromInt(num_renderables);
         self.solid_color_renderer.render(self.fullscreen_quad, .{
-            .color = window_border_color,
+            .color = color,
             .transform = transform.inner,
             .depth = depth_f,
         });

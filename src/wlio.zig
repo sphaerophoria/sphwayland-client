@@ -11,6 +11,10 @@ pub const WlFixed = packed struct(u32) {
     pub fn tof32(self: WlFixed) f32 {
         return @as(f32, @floatFromInt(self.integer)) / 256;
     }
+
+    pub fn fromi32(val: i32) WlFixed {
+        return .{ .integer = val * 256 };
+    }
 };
 
 pub fn writeWlMessage(writer: *std.io.Writer, elem: anytype, id: u32) !void {
@@ -26,6 +30,9 @@ pub fn writeWlMessage(writer: *std.io.Writer, elem: anytype, id: u32) !void {
                 size += writtenArrayLen(@field(elem, field.name));
             },
             void => {},
+            WlFixed => {
+                size += 4;
+            },
             else => {
                 @compileError("Unsupported field " ++ field.name);
             },
@@ -51,6 +58,7 @@ pub fn writeWlMessage(writer: *std.io.Writer, elem: anytype, id: u32) !void {
             []const u8 => {
                 try writeArray(writer, @field(elem, field.name));
             },
+            WlFixed => try writer.writeInt(i32, @field(elem, field.name).integer, endian),
             else => {
                 @compileError("Unsupported field " ++ field.name);
             },

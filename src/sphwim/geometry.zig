@@ -35,6 +35,7 @@ fn between(val: i32, a: i32, b: i32) bool {
 pub const WindowBorder = struct {
     const titlebar_height = 30;
     const trim_size = 2;
+    const close_width = titlebar_height;
 
     // Center position of buffer, relative to top left of screen
     surface_cx: i32,
@@ -43,9 +44,13 @@ pub const WindowBorder = struct {
     surface_width: u31,
     surface_height: u31,
 
-    pub const Location = enum {
+    pub const Location = union(enum) {
         titlebar,
-        surface,
+        close,
+        surface: struct {
+            x: i32,
+            y: i32,
+        },
     };
 
     pub fn fromRenderable(renderable: CompositorState.Renderable) WindowBorder {
@@ -58,6 +63,25 @@ pub const WindowBorder = struct {
         };
     }
 
+    pub fn contains(self: WindowBorder, x: i32, y: i32) ?Location {
+        if (self.closeQuad().contains(x, y)) {
+            return .close;
+        }
+
+        if (self.titleQuad().contains(x, y)) {
+            return .titlebar;
+        }
+
+        const surface_quad = self.surface();
+        if (surface_quad.contains(x, y)) {
+            return .{ .surface = .{
+                .x = x - surface_quad.left(),
+                .y = y - surface_quad.top(),
+            } };
+        }
+
+        return null;
+    }
     pub fn titleQuad(self: WindowBorder) PixelQuad {
         return .{
             .cx = self.surface_cx,
@@ -67,12 +91,30 @@ pub const WindowBorder = struct {
         };
     }
 
+    pub fn closeQuad(self: WindowBorder) PixelQuad {
+        return .{
+            .cx = self.surface_cx + self.surface_width / 2 - close_width / 2,
+            .cy = self.titlebarCy(),
+            .width = close_width,
+            .height = titlebar_height - trim_size * 2,
+        };
+    }
+
     pub fn windowTrim(self: WindowBorder) PixelQuad {
         return .{
             .cx = self.surface_cx,
             .cy = self.surface_cy,
             .width = self.surface_width + 2 * trim_size,
             .height = self.surface_height + 2 * trim_size,
+        };
+    }
+
+    pub fn surface(self: WindowBorder) PixelQuad {
+        return .{
+            .cx = self.surface_cx,
+            .cy = self.surface_cy,
+            .width = self.surface_width,
+            .height = self.surface_height,
         };
     }
 

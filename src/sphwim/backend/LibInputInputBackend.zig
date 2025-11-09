@@ -82,7 +82,7 @@ fn pollError(self: *LibInputInputBackend) anyerror!void {
                 const pointer_event = system.libinput_event_get_pointer_event(next_event);
                 const dx = system.libinput_event_pointer_get_dx(pointer_event);
                 const dy = system.libinput_event_pointer_get_dy(pointer_event);
-                self.compositor_state.notifyCursorMovement(@floatCast(dx), @floatCast(dy));
+                try self.compositor_state.notifyCursorMovement(@floatCast(dx), @floatCast(dy));
             },
             system.LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE => {
                 const pointer_event = system.libinput_event_get_pointer_event(next_event);
@@ -97,7 +97,7 @@ fn pollError(self: *LibInputInputBackend) anyerror!void {
                     self.compositor_state.compositor_res.height,
                 );
 
-                self.compositor_state.notifyCursorPosition(@floatCast(x), @floatCast(y));
+                try self.compositor_state.notifyCursorPosition(@floatCast(x), @floatCast(y));
             },
             else => {
                 input_logger.debug("unhandled input event for {d}", .{next_event_type});
