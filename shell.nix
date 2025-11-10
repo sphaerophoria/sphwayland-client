@@ -20,6 +20,7 @@ pkgs.mkShell {
     libdrm
     libinput
     systemd
+    black
   ];
 }
 
