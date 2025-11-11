@@ -54,10 +54,8 @@ pub const GbmContext = struct {
         const device = c.gbm_create_device(f.handle) orelse return error.GbmDeviceInit;
         errdefer c.gbm_device_destroy(device);
 
-        var modifiers: u64 = 0;
-        const surface = c.gbm_surface_create_with_modifiers2(device, init_width, init_height, format, &modifiers, 1, c.GBM_BO_USE_SCANOUT | c.GBM_BO_USE_RENDERING) orelse return error.GbmSurfaceInit;
+        const surface = try makeSurface(device, init_width, init_height);
         errdefer c.gbm_surface_destroy(surface);
-
         return .{
             .drm_handle = f,
             .device = device,
@@ -76,15 +74,27 @@ pub const GbmContext = struct {
         c.gbm_surface_release_buffer(self.surface, buf.inner);
     }
 
+    pub fn updateSurfaceSize(self: *GbmContext, width: u32, height: u32) !void {
+        const new_surface = try makeSurface(self.device, width, height);
+        c.gbm_surface_destroy(self.surface);
+        self.surface = new_surface;
+    }
+
     pub fn deinit(self: *GbmContext) void {
         c.gbm_surface_destroy(self.surface);
         c.gbm_device_destroy(self.device);
         self.drm_handle.close();
     }
+
+    fn makeSurface(device: *c.gbm_device, width: u32, height: u32) !*c.gbm_surface {
+        var modifiers: u64 = 0;
+        return c.gbm_surface_create_with_modifiers2(device, width, height, format, &modifiers, 1, c.GBM_BO_USE_SCANOUT | c.GBM_BO_USE_RENDERING) orelse return error.GbmSurfaceInit;
+    }
 };
 
 pub const EglContext = struct {
     display: c.EGLDisplay,
+    config: c.EGLConfig,
     context: c.EGLContext,
     surface: c.EGLSurface,
 
@@ -141,26 +151,53 @@ pub const EglContext = struct {
             return error.CreateContext;
         }
 
-        const surface = c.eglCreateWindowSurface(display, config, @intFromPtr(gbm_context.surface), null);
-        if (surface == c.EGL_NO_SURFACE) {
-            return error.CreateSurface;
-        }
-
+        const surface = c.EGL_NO_SURFACE;
         if (c.eglMakeCurrent(display, surface, surface, context) == 0) {
             const err = c.eglGetError();
             std.log.err("EGL error: {d}\n", .{err});
             return error.UpdateContext;
         }
 
-        return .{
+        var ret = EglContext{
             .display = display,
+            .config = config,
             .surface = surface,
             .context = context,
         };
+        // FIXME: Factor out a more reasonable fn
+        try ret.updateSurface(gbm_context.surface);
+        return ret;
     }
 
     pub fn swapBuffers(self: *const EglContext) !void {
         if (c.eglSwapBuffers(self.display, self.surface) != c.EGL_TRUE) return error.SwapFailed;
+    }
+
+    pub fn updateSurface(self: *EglContext, gbm_surface: ?*c.gbm_surface) !void {
+        const surface = if (gbm_surface != null) blk: {
+            const surface = c.eglCreateWindowSurface(self.display, self.config, @intFromPtr(gbm_surface), null);
+            if (surface == c.EGL_NO_SURFACE) {
+                return error.CreateEglSurface;
+            }
+            break :blk surface;
+        } else c.EGL_NO_SURFACE;
+
+        const old_surface = self.surface;
+        defer if (old_surface != c.EGL_NO_SURFACE) {
+            if (c.eglDestroySurface(self.display, old_surface) != c.EGL_TRUE) {
+                const err = c.eglGetError();
+                std.log.err("EGL error: 0x{x}\n", .{err});
+                unreachable;
+            }
+        };
+
+        self.surface = surface;
+
+        if (c.eglMakeCurrent(self.display, self.surface, self.surface, self.context) == 0) {
+            const err = c.eglGetError();
+            std.log.err("EGL error: {d}\n", .{err});
+            return error.UpdateContext;
+        }
     }
 
     pub fn getWidth(self: *const EglContext) !c.EGLint {

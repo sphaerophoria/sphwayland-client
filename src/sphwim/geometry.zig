@@ -1,3 +1,4 @@
+const std = @import("std");
 const CompositorState = @import("CompositorState.zig");
 
 pub const PixelQuad = struct {
@@ -33,8 +34,9 @@ fn between(val: i32, a: i32, b: i32) bool {
 }
 
 pub const WindowBorder = struct {
-    const titlebar_height = 30;
+    pub const titlebar_height = 30;
     const trim_size = 2;
+    const extra_trim_size = 8;
     const close_width = titlebar_height;
 
     // Center position of buffer, relative to top left of screen
@@ -47,6 +49,10 @@ pub const WindowBorder = struct {
     pub const Location = union(enum) {
         titlebar,
         close,
+        right_border,
+        left_border,
+        top_border,
+        bottom_border,
         surface: struct {
             x: i32,
             y: i32,
@@ -68,6 +74,22 @@ pub const WindowBorder = struct {
             return .close;
         }
 
+        if (self.rightBorderQuad().contains(x, y)) {
+            return .right_border;
+        }
+
+        if (self.leftBorderQuad().contains(x, y)) {
+            return .left_border;
+        }
+
+        if (self.topBorderQuad().contains(x, y)) {
+            return .top_border;
+        }
+
+        if (self.bottomBorderQuad().contains(x, y)) {
+            return .bottom_border;
+        }
+
         if (self.titleQuad().contains(x, y)) {
             return .titlebar;
         }
@@ -82,6 +104,7 @@ pub const WindowBorder = struct {
 
         return null;
     }
+
     pub fn titleQuad(self: WindowBorder) PixelQuad {
         return .{
             .cx = self.surface_cx,
@@ -97,6 +120,46 @@ pub const WindowBorder = struct {
             .cy = self.titlebarCy(),
             .width = close_width,
             .height = titlebar_height - trim_size * 2,
+        };
+    }
+
+    pub fn rightBorderQuad(self: WindowBorder) PixelQuad {
+        return .{
+            .cx = self.surface_cx + self.surface_width / 2 + extra_trim_size / 2,
+            .cy = self.surface_cy,
+            .width = extra_trim_size,
+            // FIXME: Hard to say where the border for dragging should end
+            .height = self.surface_height + trim_size * 2,
+        };
+    }
+
+    pub fn leftBorderQuad(self: WindowBorder) PixelQuad {
+        return .{
+            .cx = self.surface_cx - self.surface_width / 2 - extra_trim_size / 2,
+            .cy = self.surface_cy,
+            .width = extra_trim_size,
+            // FIXME: Hard to say where the border for dragging should end
+            .height = self.surface_height + trim_size * 2,
+        };
+    }
+
+    pub fn topBorderQuad(self: WindowBorder) PixelQuad {
+        return .{
+            .cx = self.surface_cx,
+            .cy = self.surface_cy - self.surface_height / 2 - titlebar_height - extra_trim_size / 2,
+            .width = self.surface_width + trim_size * 2,
+            // FIXME: Hard to say where the border for dragging should end
+            .height = extra_trim_size,
+        };
+    }
+
+    pub fn bottomBorderQuad(self: WindowBorder) PixelQuad {
+        return .{
+            .cx = self.surface_cx,
+            .cy = self.surface_cy + self.surface_height / 2 + extra_trim_size / 2,
+            .width = self.surface_width + trim_size * 2,
+            // FIXME: Hard to say where the border for dragging should end
+            .height = extra_trim_size,
         };
     }
 

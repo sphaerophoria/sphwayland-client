@@ -128,6 +128,24 @@ pub fn requestFrame(self: *Connection, surface_id: WlSurfaceId) !void {
     try self.io_writer.flush();
 }
 
+pub fn requestResize(self: *Connection, wl_surface_id: WlSurfaceId, width: i32, height: i32) !void {
+    const surface = self.wl_surfaces.getPtr(wl_surface_id) orelse return error.InvalidWlSurfaceId;
+    const xdg_surface_id = surface.xdg_surface_id orelse return error.NotXdgSurface;
+    const toplevel_id = surface.toplevel_id orelse return error.InvalidResizeTarget;
+
+    const toplevel_interface = Bindings.XdgToplevel{ .id = toplevel_id.inner };
+    try toplevel_interface.configure(self.io_writer, .{
+        .width = width,
+        .height = height,
+        // FIXME: Hardcoded
+        .states = std.mem.asBytes(&[2]u32{ 3, 4 }),
+    });
+
+    try self.emitXdgSurfaceConfigure(xdg_surface_id, surface);
+
+    try self.io_writer.flush();
+}
+
 pub fn closeWindow(self: *Connection, toplevel_id: XdgToplevelId) !void {
     var toplevel_interface = Bindings.XdgToplevel{ .id = toplevel_id.inner };
     try toplevel_interface.close(self.io_writer, .{});
@@ -496,6 +514,7 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
 
                 // FIXME: If wl_surface has a role this should emit a role error
 
+                surface.xdg_surface_id = xdg_id;
                 try self.xdg_surfaces.put(xdg_id, wl_surface_id);
                 try self.interface_registry.put(params.id, .xdg_surface, diagnostics);
 
@@ -585,7 +604,7 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
                     surface.committed_buffer = next_buf;
 
                     if (surface.committed_buffer_handle) |h| {
-                        self.compositor_state.renderables.swapBuffer(
+                        self.compositor_state.swapRenderableBuffer(
                             h,
                             next_buf.render_buffer,
                             next_buf.buf_id,
@@ -982,6 +1001,7 @@ const Surface = struct {
 
     callback_id: ?u32 = null,
     outstanding_xdg_configure: ?u32 = null,
+    xdg_surface_id: ?XdgSurfaceId = null,
     toplevel_id: ?XdgToplevelId = null,
 
     fn deinit(self: Surface, alloc: std.mem.Allocator, fd_pool: *FdPool, compositor_state: *CompositorState) void {

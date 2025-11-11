@@ -168,7 +168,7 @@ pub const Renderer = struct {
         const cursor_x: i32 = @intFromFloat(self.compositor_state.cursor_pos.x);
         const cursor_y: i32 = @intFromFloat(self.compositor_state.cursor_pos.y);
         for (renderables_sorted, 0..) |handle, depth| {
-            std.debug.print("Rendering {d}\n", .{handle.inner});
+            //std.debug.print("Rendering {d}\n", .{handle.inner});
             const renderable = renderables.storage.get(handle);
             self.renderWindowSurface(renderable.*, depth, num_renderables) catch |e| {
                 logger.warn("failed to import texture {t}, skipping window", .{e});

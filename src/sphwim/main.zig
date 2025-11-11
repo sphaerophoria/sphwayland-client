@@ -9,11 +9,11 @@ const gl = sphtud.render.gl;
 const backend = @import("backend.zig");
 
 pub const std_options = std.Options{
-    .log_level = .debug,
+    .log_level = .warn,
     .log_scope_levels = &.{
         .{
             .scope = .wl_connection,
-            .level = .debug,
+            .level = .err,
         },
     },
 };

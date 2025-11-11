@@ -130,6 +130,7 @@ fn displayBuffer(self: *WaylandRenderBackend, renderer: *rendering.Renderer, buf
     try self.outstanding_buffers.put(buf_id, buffer);
 }
 
+// FIXME: Name change
 const OutstandingBufNotifier = struct {
     outstanding_buffers: *sphtud.util.AutoHashMap(u32, system_gl.GbmContext.Buffer),
     renderer: *rendering.Renderer,
@@ -141,5 +142,12 @@ const OutstandingBufNotifier = struct {
         };
 
         self.renderer.releaseBuffer(buffer);
+    }
+
+    // FIXME: impl
+    pub fn requestResize(self: @This(), width: i32, height: i32) !void {
+        _ = self;
+        _ = width;
+        _ = height;
     }
 };

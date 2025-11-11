@@ -22,6 +22,22 @@ const DragState = union(enum) {
         id: Renderables.Handle,
         last: CursorPos,
     },
+    resize_window_right: struct {
+        id: Renderables.Handle,
+        left_edge: i32,
+    },
+    resize_window_top: struct {
+        id: Renderables.Handle,
+        bottom_edge: i32,
+    },
+    resize_window_left: struct {
+        id: Renderables.Handle,
+        right_edge: i32,
+    },
+    resize_window_bottom: struct {
+        id: Renderables.Handle,
+        top_edge: i32,
+    },
     none,
 };
 
@@ -65,6 +81,52 @@ pub fn notifyCursorPosition(self: *CompositorState, x: f32, y: f32) !void {
             renderable.cx += @intFromFloat(self.cursor_pos.x - params.last.x);
             renderable.cy += @intFromFloat(self.cursor_pos.y - params.last.y);
             params.last = self.cursor_pos;
+        },
+        .resize_window_right => |*params| {
+            const renderable = self.renderables.storage.get(params.id);
+            const si = renderable.source_info;
+
+            var new_width: f32 = @floatFromInt(renderable.buffer.width);
+            new_width = self.cursor_pos.x - @as(f32, @floatFromInt(params.left_edge));
+            new_width = @max(new_width, 1);
+
+            try si.connection.requestResize(si.surface, @intFromFloat(new_width), renderable.buffer.height);
+        },
+        .resize_window_left => |*params| {
+            const renderable = self.renderables.storage.get(params.id);
+            const si = renderable.source_info;
+
+            var new_width: f32 = @floatFromInt(renderable.buffer.width);
+            // FIXME: Single line difference with right
+            new_width = @as(f32, @floatFromInt(params.right_edge)) - self.cursor_pos.x;
+            new_width = @max(new_width, 1);
+
+            try si.connection.requestResize(si.surface, @intFromFloat(new_width), renderable.buffer.height);
+        },
+        .resize_window_top => |*params| {
+            const renderable = self.renderables.storage.get(params.id);
+            const si = renderable.source_info;
+
+            // FIXME: Chunk feels duped with left/right
+            var new_height: f32 = @floatFromInt(renderable.buffer.height);
+            // FIXME: Single line difference with right
+            // FIXME: Bad abstraction
+            new_height = @as(f32, @floatFromInt(params.bottom_edge)) - self.cursor_pos.y - geometry.WindowBorder.titlebar_height;
+            new_height = @max(new_height, 1);
+
+            try si.connection.requestResize(si.surface, renderable.buffer.width, @intFromFloat(new_height));
+        },
+        .resize_window_bottom => |*params| {
+            const renderable = self.renderables.storage.get(params.id);
+            const si = renderable.source_info;
+
+            // FIXME: Chunk feels duped with left/right
+            var new_height: f32 = @floatFromInt(renderable.buffer.height);
+            // FIXME: Single line difference with top
+            new_height = self.cursor_pos.y - @as(f32, @floatFromInt(params.top_edge));
+            new_height = @max(new_height, 1);
+
+            try si.connection.requestResize(si.surface, renderable.buffer.width, @intFromFloat(new_height));
         },
         .none => {
             const cp = self.scratch.checkpoint();
@@ -114,7 +176,7 @@ pub fn pushRenderable(
 
 pub fn removeRenderable(self: *CompositorState, handle: Renderables.Handle) void {
     switch (self.drag_state) {
-        .moving_window => |move_state| {
+        inline .moving_window, .resize_window_right, .resize_window_bottom, .resize_window_left, .resize_window_top => |move_state| {
             if (move_state.id.inner == handle.inner) {
                 self.drag_state = .none;
             }
@@ -143,6 +205,35 @@ pub fn removeRenderable(self: *CompositorState, handle: Renderables.Handle) void
             std.log.err("failed to scramble for testing", .{});
         };
     }
+}
+
+pub fn swapRenderableBuffer(self: *CompositorState, handle: Renderables.Handle, new_buffer: rendering.RenderBuffer, new_buffer_id: wayland.Connection.WlBufferId) void {
+    const item = self.renderables.storage.get(handle);
+    const dw = new_buffer.width - item.buffer.width;
+    const dh = new_buffer.height - item.buffer.height;
+    if (dw != 0 or dh != 0) {
+        switch (self.drag_state) {
+            .resize_window_right => |params| {
+                // Anchor left edge
+                item.cx = params.left_edge + @divTrunc(new_buffer.width, 2);
+            },
+            .resize_window_left => |params| {
+                // Anchor right edge
+                item.cx = params.right_edge - @divTrunc(new_buffer.width, 2);
+            },
+            .resize_window_top => |params| {
+                // Anchor left edge
+                item.cy = params.bottom_edge - @divTrunc(new_buffer.height, 2);
+            },
+            .resize_window_bottom => |params| {
+                // Anchor top edge
+                item.cy = params.top_edge + @divTrunc(new_buffer.height, 2);
+            },
+            .none, .moving_window => {},
+        }
+    }
+    item.source_info.buffer_id = new_buffer_id;
+    item.buffer = new_buffer;
 }
 
 pub fn notifyMouse1Up(self: *CompositorState) void {
@@ -199,6 +290,46 @@ pub fn notifyMouse1Down(self: *CompositorState) !void {
                 },
             };
         },
+        .right_border => {
+            const renderable = self.renderables.storage.get(res.handle);
+            self.drag_state = .{
+                .resize_window_right = .{
+                    .id = res.handle,
+                    // FIXME: Center half pixel
+                    .left_edge = renderable.cx - @divTrunc(renderable.buffer.width, 2),
+                },
+            };
+        },
+        .left_border => {
+            const renderable = self.renderables.storage.get(res.handle);
+            self.drag_state = .{
+                .resize_window_left = .{
+                    .id = res.handle,
+                    // FIXME: Center half pixel
+                    .right_edge = renderable.cx + @divTrunc(renderable.buffer.width, 2),
+                },
+            };
+        },
+        .top_border => {
+            const renderable = self.renderables.storage.get(res.handle);
+            self.drag_state = .{
+                .resize_window_top = .{
+                    .id = res.handle,
+                    // FIXME: Center half pixel
+                    .bottom_edge = renderable.cy + @divTrunc(renderable.buffer.height, 2),
+                },
+            };
+        },
+        .bottom_border => {
+            const renderable = self.renderables.storage.get(res.handle);
+            self.drag_state = .{
+                .resize_window_bottom = .{
+                    .id = res.handle,
+                    // FIXME: Center half pixel
+                    .top_edge = renderable.cy - @divTrunc(renderable.buffer.height, 2),
+                },
+            };
+        },
         .close => {
             const source_info = self.renderables.storage.get(res.handle).source_info;
             try source_info.connection.closeWindow(source_info.window);
@@ -218,6 +349,7 @@ pub const SourceInfo = struct {
 
 pub const Renderable = struct {
     source_info: SourceInfo,
+    // FIXME: Sometimes the center is half a pixel in
     cx: i32,
     cy: i32,
     // Largest means on top
@@ -257,12 +389,6 @@ pub const Renderables = struct {
         };
     }
 
-    pub fn swapBuffer(self: *Renderables, handle: Renderables.Handle, new_buffer: rendering.RenderBuffer, new_buffer_id: wayland.Connection.WlBufferId) void {
-        const item = self.storage.get(handle);
-        item.source_info.buffer_id = new_buffer_id;
-        item.buffer = new_buffer;
-    }
-
     pub fn getSortedHandles(self: *Renderables, alloc: std.mem.Allocator) ![]Handle {
         const num_renderables = self.storage.count();
         const renderables_sorted = try alloc.alloc(CompositorState.Renderables.Handle, num_renderables);
@@ -281,7 +407,7 @@ pub const Renderables = struct {
 
         pub fn notifyMoved(self: StorageMoveCtx, from: Handle, to: Handle) void {
             switch (self.drag_state.*) {
-                .moving_window => |*move_state| {
+                inline .resize_window_right, .resize_window_left, .resize_window_top, .resize_window_bottom, .moving_window => |*move_state| {
                     if (move_state.id.inner == from.inner) {
                         move_state.id = to;
                     }
