@@ -67,7 +67,7 @@ const Handler = struct {
 
     pub fn close(_: ?*anyopaque) void {}
 
-    fn poll(ctx: ?*anyopaque, _: *sphtud.event.LoopSphalloc, reason: sphtud.event.PollReason) sphtud.event.LoopSphalloc.PollResult {
+    fn poll(ctx: ?*anyopaque, _: *sphtud.event.Loop, reason: sphtud.event.PollReason) sphtud.event.Loop.PollResult {
         const self: *Handler = @ptrCast(@alignCast(ctx));
 
         self.pollError(reason) catch |e| {
@@ -140,7 +140,7 @@ const Handler = struct {
     }
 };
 
-pub fn makeHandler(self: *Drm, alloc: std.mem.Allocator, renderer: *rendering.Renderer) !sphtud.event.LoopSphalloc.Handler {
+pub fn makeHandler(self: *Drm, alloc: std.mem.Allocator, renderer: *rendering.Renderer) !sphtud.event.Loop.Handler {
     const handler_ctx = try alloc.create(Handler);
     handler_ctx.* = .{
         .parent = self,

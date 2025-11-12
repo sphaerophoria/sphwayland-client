@@ -1,4 +1,5 @@
 const std = @import("std");
+const sphtud = @import("sphtud");
 const Allocator = std.mem.Allocator;
 const wlio = @import("wlio");
 const HeaderLE = wlio.HeaderLE;
@@ -16,8 +17,8 @@ pub fn Client(comptime Bindings: type) type {
 
         const Self = @This();
 
-        pub fn init(alloc: Allocator) !Self {
-            const stream = try openWaylandConnection(alloc);
+        pub fn init(alloc: Allocator, expansion_alloc: sphtud.util.ExpansionAlloc) !Self {
+            const stream = try openWaylandConnection();
             const display = Bindings.WlDisplay{ .id = 1 };
             const registry = Bindings.WlRegistry{ .id = 2 };
             var stream_writer = stream.writer(&.{});
@@ -25,7 +26,7 @@ pub fn Client(comptime Bindings: type) type {
                 .registry = registry.id,
             });
 
-            const interfaces = try InterfaceRegistry(Bindings).init(alloc, registry);
+            const interfaces = try InterfaceRegistry(Bindings).init(alloc, expansion_alloc, registry);
 
             return .{
                 .interfaces = interfaces,
@@ -35,7 +36,7 @@ pub fn Client(comptime Bindings: type) type {
         }
 
         pub fn deinit(self: *Self) void {
-            self.interfaces.deinit();
+            self.stream.close();
         }
 
         pub fn bind(self: *Self, comptime T: type, global: Bindings.WlRegistry.IncomingMessage.Global) !T {
@@ -43,7 +44,7 @@ pub fn Client(comptime Bindings: type) type {
         }
 
         pub fn newId(self: *Self, comptime T: type) !T {
-            return try self.interfaces.register(T);
+            return self.interfaces.register(T);
         }
 
         pub fn registerId(self: *Self, id: u32, interface_type: Bindings.WaylandEventType) !void {
@@ -91,10 +92,13 @@ pub fn InterfaceRegistry(comptime Bindings: type) type {
         registry: Bindings.WlRegistry,
 
         const Self = @This();
-        const InterfaceMap = std.AutoHashMap(u32, Bindings.WaylandInterfaceType);
+        const InterfaceMap = sphtud.util.AutoHashMap(u32, Bindings.WaylandInterfaceType);
 
-        pub fn init(alloc: Allocator, registry: Bindings.WlRegistry) !Self {
-            var elems = InterfaceMap.init(alloc);
+        pub fn init(alloc: Allocator, expansion_alloc: sphtud.util.ExpansionAlloc, registry: Bindings.WlRegistry) !Self {
+            // How many outstanding wayland objects could we possibly have? I'd
+            // guess we have around 30 things bound, 64 seems like ~2x and a
+            // power of 2, 1024 seems bonkers bananas
+            var elems = try InterfaceMap.init(alloc, expansion_alloc, 64, 1024);
 
             try elems.put(1, .wl_display);
             try elems.put(registry.id, .wl_registry);
@@ -104,10 +108,6 @@ pub fn InterfaceRegistry(comptime Bindings: type) type {
                 .elems = elems,
                 .registry = registry,
             };
-        }
-
-        pub fn deinit(self: *Self) void {
-            self.elems.deinit();
         }
 
         pub fn get(self: Self, id: u32) ?Bindings.WaylandInterfaceType {
@@ -288,12 +288,13 @@ pub fn EventIt(comptime Bindings: type) type {
     };
 }
 
-fn openWaylandConnection(alloc: Allocator) !std.net.Stream {
+fn openWaylandConnection() !std.net.Stream {
     const xdg_runtime_dir = std.posix.getenv("XDG_RUNTIME_DIR") orelse return error.NoXdgRuntime;
     const wayland_display = std.posix.getenv("WAYLAND_DISPLAY") orelse return error.NoWaylandDisplay;
 
-    const socket_path = try std.fs.path.joinZ(alloc, &.{ xdg_runtime_dir, wayland_display });
-    defer alloc.free(socket_path);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var tmp_alloc = std.heap.FixedBufferAllocator.init(&path_buf);
+    const socket_path = try std.fs.path.join(tmp_alloc.allocator(), &.{ xdg_runtime_dir, wayland_display });
 
     return try std.net.connectUnixSocket(socket_path);
 }

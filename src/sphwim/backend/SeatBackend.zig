@@ -29,10 +29,10 @@ pub fn init(alloc: std.mem.Allocator) !backend.Backend {
     };
 }
 
-fn makeHandlers(ctx: ?*anyopaque, alloc: std.mem.Allocator, renderer: *rendering.Renderer, compositor_state: *CompositorState) anyerror![]sphtud.event.LoopSphalloc.Handler {
+fn makeHandlers(ctx: ?*anyopaque, alloc: std.mem.Allocator, renderer: *rendering.Renderer, compositor_state: *CompositorState) anyerror![]sphtud.event.Loop.Handler {
     const self: *SeatBackend = @ptrCast(@alignCast(ctx));
 
-    const handlers = try alloc.alloc(sphtud.event.LoopSphalloc.Handler, 2);
+    const handlers = try alloc.alloc(sphtud.event.Loop.Handler, 2);
     handlers[0] = try self.drm.makeHandler(alloc, renderer);
     handlers[1] = try LibinputHandler.init(alloc, compositor_state);
 

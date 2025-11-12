@@ -15,11 +15,11 @@ pub const Backend = struct {
     vtable: *const VTable,
 
     const VTable = struct {
-        makeHandlers: *const fn (ctx: ?*anyopaque, alloc: std.mem.Allocator, renderer: *rendering.Renderer, compositor_state: *CompositorState) anyerror![]sphtud.event.LoopSphalloc.Handler,
+        makeHandlers: *const fn (ctx: ?*anyopaque, alloc: std.mem.Allocator, renderer: *rendering.Renderer, compositor_state: *CompositorState) anyerror![]sphtud.event.Loop.Handler,
         deinit: *const fn (ctx: ?*anyopaque) void,
     };
 
-    pub fn makeHandlers(self: Backend, alloc: std.mem.Allocator, renderer: *rendering.Renderer, compositor_state: *CompositorState) ![]sphtud.event.LoopSphalloc.Handler {
+    pub fn makeHandlers(self: Backend, alloc: std.mem.Allocator, renderer: *rendering.Renderer, compositor_state: *CompositorState) ![]sphtud.event.Loop.Handler {
         return self.vtable.makeHandlers(self.ctx, alloc, renderer, compositor_state);
     }
 
@@ -28,8 +28,8 @@ pub const Backend = struct {
     }
 };
 
-pub fn initBackend(alloc: std.mem.Allocator, system_running: *bool) !Backend {
-    if (WaylandBackend.init(alloc, system_running)) |res| {
+pub fn initBackend(alloc: std.mem.Allocator, expansion_alloc: sphtud.util.ExpansionAlloc, system_running: *bool) !Backend {
+    if (WaylandBackend.init(alloc, expansion_alloc, system_running)) |res| {
         return res;
     } else |e| {
         logger.info("Failed to init wayland render backend: {t}", .{e});

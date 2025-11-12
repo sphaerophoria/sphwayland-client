@@ -48,7 +48,7 @@ const ServerCtx = struct {
     gbm_context: *const system_gl.GbmContext,
     format_table: FormatTable,
 
-    pub fn generate(self: *ServerCtx, connection: std.net.Server.Connection) !sphtud.event.LoopSphalloc.Handler {
+    pub fn generate(self: *ServerCtx, connection: std.net.Server.Connection) !sphtud.event.Loop.Handler {
         const connection_alloc = try self.server_alloc.makeSubAlloc("connection");
         errdefer connection_alloc.deinit();
 
@@ -70,7 +70,7 @@ pub fn makeWaylandServer(
     compositor_state: *CompositorState,
     gbm_context: *const system_gl.GbmContext,
     egl_context: *const system_gl.EglContext,
-) !sphtud.event.net.Server(sphtud.event.LoopSphalloc, ServerCtx) {
+) !sphtud.event.net.Server(ServerCtx) {
     const xdg_runtime_dir = std.posix.getenv("XDG_RUNTIME_DIR") orelse return error.NoXdgRuntime;
 
     var idx: usize = 0;
@@ -97,7 +97,7 @@ pub fn makeWaylandServer(
         break :blk ret;
     };
 
-    return sphtud.event.net.server(sphtud.event.LoopSphalloc, net_serv, ServerCtx{
+    return sphtud.event.net.server(net_serv, ServerCtx{
         .server_alloc = server_alloc,
         .scratch = scratch,
         .rand = rand,

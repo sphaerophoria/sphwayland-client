@@ -12,16 +12,16 @@ const logger = std.log.scoped(.wayland_renderer);
 
 window: sphwindow.Window,
 system_running: *bool,
-outstanding_buffers: sphtud.util.AutoHashMapLinear(u32, system_gl.GbmContext.Buffer),
+outstanding_buffers: sphtud.util.AutoHashMap(u32, system_gl.GbmContext.Buffer),
 
-pub fn init(alloc: std.mem.Allocator, system_running: *bool) !backend.Backend {
+pub fn init(alloc: std.mem.Allocator, expansion_alloc: sphtud.util.ExpansionAlloc, system_running: *bool) !backend.Backend {
     const ctx = try alloc.create(WaylandRenderBackend);
 
     ctx.* = .{
-        .window = try sphwindow.Window.init(alloc),
+        .window = try sphwindow.Window.init(alloc, expansion_alloc),
         .system_running = system_running,
         // Anything over quadruple buffering would be quite surprising to me
-        .outstanding_buffers = try .init(alloc, alloc, 4, 4),
+        .outstanding_buffers = try .init(alloc, .linear(alloc), 4, 4),
     };
 
     return .{
@@ -47,7 +47,7 @@ const Handler = struct {
 
     fn close(_: ?*anyopaque) void {}
 
-    fn poll(ctx: ?*anyopaque, _: *sphtud.event.LoopSphalloc, _: sphtud.event.PollReason) sphtud.event.LoopSphalloc.PollResult {
+    fn poll(ctx: ?*anyopaque, _: *sphtud.event.Loop, _: sphtud.event.PollReason) sphtud.event.Loop.PollResult {
         const self: *Handler = @ptrCast(@alignCast(ctx));
         self.parent.pollError(self.renderer, self.compositor_state) catch |e| {
             logger.err("Failed to poll: {t}", .{e});
@@ -58,7 +58,7 @@ const Handler = struct {
     }
 };
 
-fn makeHandlers(ctx: ?*anyopaque, alloc: std.mem.Allocator, renderer: *rendering.Renderer, compositor_state: *CompositorState) ![]sphtud.event.LoopSphalloc.Handler {
+fn makeHandlers(ctx: ?*anyopaque, alloc: std.mem.Allocator, renderer: *rendering.Renderer, compositor_state: *CompositorState) ![]sphtud.event.Loop.Handler {
     const self: *WaylandRenderBackend = @ptrCast(@alignCast(ctx));
     const fd = self.window.getFd();
 
@@ -69,7 +69,7 @@ fn makeHandlers(ctx: ?*anyopaque, alloc: std.mem.Allocator, renderer: *rendering
         .compositor_state = compositor_state,
     };
 
-    const handlers = try alloc.alloc(sphtud.event.LoopSphalloc.Handler, 1);
+    const handlers = try alloc.alloc(sphtud.event.Loop.Handler, 1);
     handlers[0] = .{
         .ptr = handler_ctx,
         .fd = fd,
@@ -94,7 +94,8 @@ fn pollError(self: *WaylandRenderBackend, renderer: *rendering.Renderer, composi
         self.system_running.* = false;
     }
 
-    for (self.window.inputEvents()) |event| switch (event) {
+    var input_event_it = self.window.inputEvents();
+    while (input_event_it.next()) |event| switch (event.*) {
         .pointer_movement => |pos| compositor_state.notifyCursorPosition(pos.x, pos.y),
         .mouse1_down => compositor_state.notifyMouse1Down(),
         .mouse1_up => compositor_state.notifyMouse1Up(),
@@ -130,7 +131,7 @@ fn displayBuffer(self: *WaylandRenderBackend, renderer: *rendering.Renderer, buf
 }
 
 const OutstandingBufNotifier = struct {
-    outstanding_buffers: *sphtud.util.AutoHashMapLinear(u32, system_gl.GbmContext.Buffer),
+    outstanding_buffers: *sphtud.util.AutoHashMap(u32, system_gl.GbmContext.Buffer),
     renderer: *rendering.Renderer,
 
     pub fn notifyGlBufferRelease(self: @This(), buf_id: u32) void {

@@ -1,13 +1,13 @@
 const std = @import("std");
 const sphtud = @import("sphtud");
 
-inner: sphtud.util.AutoHashMapSphalloc(std.posix.fd_t, void),
+inner: sphtud.util.AutoHashMap(std.posix.fd_t, void),
 
 const FdPool = @This();
 
 pub fn init(alloc: *sphtud.alloc.Sphalloc, typical_files: usize, max_files: usize) !FdPool {
     return .{
-        .inner = try .init(alloc.arena(), alloc.block_alloc.allocator(), typical_files, max_files),
+        .inner = try .init(alloc.arena(), alloc.expansion(), typical_files, max_files),
     };
 }
 

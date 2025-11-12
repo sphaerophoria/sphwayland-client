@@ -166,8 +166,8 @@ pub const Renderable = struct {
 
 // Ties wayland surfaces that are ready to their renderable state
 pub const Renderables = struct {
-    expansion_alloc: std.mem.Allocator,
-    storage: sphtud.util.ObjectPoolSphalloc(Renderable, Handle),
+    expansion_alloc: sphtud.util.ExpansionAlloc,
+    storage: sphtud.util.ObjectPool(Renderable, Handle),
     debug: ExtraDebug,
 
     const ExtraDebug = if (builtin.mode == .Debug) struct {
@@ -176,10 +176,12 @@ pub const Renderables = struct {
     } else void;
 
     pub fn init(alloc: *sphtud.alloc.Sphalloc, scratch: sphtud.alloc.LinearAllocator, random: std.Random) !Renderables {
+        const expansion_alloc = alloc.expansion();
         return .{
-            .expansion_alloc = alloc.block_alloc.allocator(),
+            .expansion_alloc = expansion_alloc,
             .storage = try .init(
                 alloc.arena(),
+                expansion_alloc,
                 100,
                 10000,
             ),

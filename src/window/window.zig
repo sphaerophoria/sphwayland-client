@@ -1,4 +1,5 @@
 const std = @import("std");
+const sphtud = @import("sphtud");
 const wlclient = @import("wlclient");
 const wlb = @import("wl_bindings");
 const system = @import("system.zig");
@@ -80,7 +81,7 @@ fn resolveDriHandleFromDevt(alloc: std.mem.Allocator, val_opt: ?u64) ![]const u8
     const default_card = "/dev/dri/card0";
     const val = val_opt orelse {
         std.log.warn("No GPU provided by compositor, using default", .{});
-        return default_card;
+        return try alloc.dupe(u8, default_card);
     };
 
     var dir = try std.fs.openDirAbsolute("/dev/dri", .{ .iterate = true });
@@ -220,9 +221,9 @@ pub const Window = struct {
 
     wants_frame: bool = false,
 
-    alloc: std.mem.Allocator,
-    input_events: std.ArrayList(InputEvent) = .{},
-    pending_input_events: std.ArrayList(InputEvent) = .{},
+    alloc: sphtud.util.ExpansionAlloc,
+    input_events: sphtud.util.RuntimeSegmentedListUnmanaged(InputEvent),
+    pending_input_events: sphtud.util.RuntimeSegmentedListUnmanaged(InputEvent),
 
     preferred_gpu: ?u64,
 
@@ -244,8 +245,8 @@ pub const Window = struct {
         y: f32,
     };
 
-    pub fn init(alloc: std.mem.Allocator) !Window {
-        var client = try wlclient.Client(wlb).init(alloc);
+    pub fn init(arena: std.mem.Allocator, expansion_alloc: sphtud.util.ExpansionAlloc) !Window {
+        var client = try wlclient.Client(wlb).init(arena, expansion_alloc);
         errdefer client.deinit();
 
         const writer = client.writer();
@@ -293,6 +294,9 @@ pub const Window = struct {
             .callback = frame_callback.id,
         });
 
+        const typical_input_events = 24;
+        const max_input_events = 1024;
+
         var ret = Window{
             .compositor = bound_interfaces.compositor,
             .xdg_wm_base = bound_interfaces.xdg_wm_base,
@@ -305,9 +309,9 @@ pub const Window = struct {
             .client = client,
             .preferred_gpu = preferred_gpu,
 
-            .alloc = alloc,
-            .input_events = .{},
-            .pending_input_events = .{},
+            .alloc = expansion_alloc,
+            .input_events = try .init(arena, expansion_alloc, typical_input_events, max_input_events),
+            .pending_input_events = try .init(arena, expansion_alloc, typical_input_events, max_input_events),
         };
         errdefer ret.deinit();
 
@@ -321,8 +325,6 @@ pub const Window = struct {
 
     pub fn deinit(self: *Window) void {
         self.client.deinit();
-        self.input_events.deinit(self.alloc);
-        self.pending_input_events.deinit(self.alloc);
     }
 
     // By default users will use DefaultGlCtx above, but some users of this
@@ -405,6 +407,9 @@ pub const Window = struct {
             .flags = 0,
         });
 
+        try params.destroy(self.client.writer(), .{});
+        self.client.removeId(params.id);
+
         try self.wl_surface.attach(self.client.writer(), .{
             .buffer = wl_buf.id,
             .x = 0,
@@ -478,6 +483,8 @@ pub const Window = struct {
                         const iface = wlb.WlBuffer{ .id = event.object_id };
                         try iface.destroy(self.client.writer(), .{});
 
+                        self.client.removeId(event.object_id);
+
                         gl_ctx.notifyGlBufferRelease(event.object_id);
                     },
                 }
@@ -487,13 +494,18 @@ pub const Window = struct {
                     .created, .failed => {
                         var params = wlb.ZwpLinuxBufferParamsV1{ .id = event.object_id };
                         try params.destroy(self.client.writer(), .{});
+
+                        self.client.removeId(event.object_id);
                     },
                 }
             },
             .wl_pointer => |parsed| switch (parsed) {
                 .frame => {
-                    try self.input_events.appendSlice(self.alloc, self.pending_input_events.items);
-                    self.pending_input_events.clearRetainingCapacity();
+                    var block_it = self.pending_input_events.blockIter();
+                    while (block_it.next()) |block| {
+                        try self.input_events.appendSlice(self.alloc, block);
+                    }
+                    self.pending_input_events.clear(self.alloc);
                 },
                 .motion => |params| {
                     const pointer_update = InputEvent{ .pointer_movement = .{
@@ -519,11 +531,11 @@ pub const Window = struct {
         return false;
     }
 
-    pub fn inputEvents(self: Window) []InputEvent {
-        return self.input_events.items;
+    pub fn inputEvents(self: Window) sphtud.util.RuntimeSegmentedList(InputEvent).Iter {
+        return self.input_events.iter();
     }
 
     fn clearInputEvents(self: *Window) void {
-        self.input_events = .{};
+        self.input_events.clear(self.alloc);
     }
 };

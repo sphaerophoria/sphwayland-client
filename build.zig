@@ -123,12 +123,13 @@ const Builder = struct {
         return wlclient;
     }
 
-    pub fn makeWlClient(self: Builder, wlio: *std.Build.Module, wl_cmsg: *std.Build.Module) *std.Build.Module {
+    pub fn makeWlClient(self: Builder, wlio: *std.Build.Module, wl_cmsg: *std.Build.Module, sphtud: *std.Build.Module) *std.Build.Module {
         const wlclient = self.b.addModule("wlclient", .{
             .root_source_file = self.b.path("src/wlclient.zig"),
         });
         wlclient.addImport("wlio", wlio);
         wlclient.addImport("wl_cmsg", wl_cmsg);
+        wlclient.addImport("sphtud", sphtud);
         return wlclient;
     }
 
@@ -138,7 +139,7 @@ const Builder = struct {
         return module;
     }
 
-    pub fn makeWindow(self: Builder, wlio: *std.Build.Module, bindings: *std.Build.Module, wlclient: *std.Build.Module, gl_bindings: *std.Build.Module) !*std.Build.Module {
+    pub fn makeWindow(self: Builder, wlio: *std.Build.Module, bindings: *std.Build.Module, wlclient: *std.Build.Module, gl_bindings: *std.Build.Module, sphtud: *std.Build.Module) !*std.Build.Module {
         const sphwindow = self.b.addModule("sphwindow", .{
             .root_source_file = self.b.path("src/window/window.zig"),
             .target = self.target,
@@ -148,6 +149,7 @@ const Builder = struct {
         sphwindow.addImport("c_bindings", gl_bindings);
         sphwindow.addImport("wl_bindings", bindings);
         sphwindow.addImport("wlclient", wlclient);
+        sphwindow.addImport("sphtud", sphtud);
         sphwindow.linkSystemLibrary("EGL", .{});
         sphwindow.linkSystemLibrary("gbm", .{});
 
@@ -264,17 +266,17 @@ pub fn build(b: *std.Build) !void {
         .b = b,
     };
 
+    const sphtud = builder.importSphtud();
     const wlio_mod = builder.makeWlio();
     const wlgen = builder.makeWlgen();
     const client_bindings = builder.makeClientBindings(wlgen, wlio_mod);
     const wl_cmsg = builder.makeWlCmsg();
-    const wlclient = builder.makeWlClient(wlio_mod, wl_cmsg);
+    const wlclient = builder.makeWlClient(wlio_mod, wl_cmsg, sphtud);
     const system_gl_bindings = try builder.makeSystemGlBindings();
-    const sphwindow = try builder.makeWindow(wlio_mod, client_bindings, wlclient, system_gl_bindings);
+    const sphwindow = try builder.makeWindow(wlio_mod, client_bindings, wlclient, system_gl_bindings, sphtud);
     const wait_for_wl = try builder.makeWlWaiter(wlio_mod, client_bindings, wlclient);
     const example = try builder.makeWindowExample(sphwindow);
 
-    const sphtud = builder.importSphtud();
     const server_bindings = builder.makeServerBindings(wlgen, wlio_mod);
     const wm = try builder.makeWm(wlio_mod, server_bindings, sphtud, wl_cmsg, sphwindow);
 

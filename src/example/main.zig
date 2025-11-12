@@ -22,12 +22,12 @@ pub fn initializeGlParams() void {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+    var alloc_buf: [1 * 1024 * 1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&alloc_buf);
 
-    const alloc = gpa.allocator();
+    const alloc = fba.allocator();
 
-    var window = try sphwindow.Window.init(alloc);
+    var window = try sphwindow.Window.init(alloc, .linear(alloc));
     defer window.deinit();
 
     var gl_ctx = blk: {
@@ -45,8 +45,9 @@ pub fn main() !void {
 
     while (!(try window.service(&gl_ctx))) {
         // Only returns a position on frame()
-        for (window.inputEvents()) |event| {
-            switch (event) {
+        var event_it = window.inputEvents();
+        while (event_it.next()) |event| {
+            switch (event.*) {
                 .pointer_movement => |pos| {
                     std.debug.print("Pointer at {any}\n", .{pos});
                 },

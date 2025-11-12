@@ -16,7 +16,7 @@ const libinput_interface = system.libinput_interface{
     .close_restricted = closeFile,
 };
 
-pub fn init(alloc: std.mem.Allocator, compositor_state: *CompositorState) !sphtud.event.LoopSphalloc.Handler {
+pub fn init(alloc: std.mem.Allocator, compositor_state: *CompositorState) !sphtud.event.Loop.Handler {
     const udev_ctx = system.udev_new() orelse return error.UdevInit;
 
     const input_ctx = system.libinput_udev_create_context(&libinput_interface, null, udev_ctx) orelse return error.CreateContext;
@@ -55,7 +55,7 @@ fn closeFile(fd: c_int, _: ?*anyopaque) callconv(.c) void {
     std.posix.close(fd);
 }
 
-fn poll(ctx: ?*anyopaque, _: *sphtud.event.LoopSphalloc, _: sphtud.event.PollReason) sphtud.event.LoopSphalloc.PollResult {
+fn poll(ctx: ?*anyopaque, _: *sphtud.event.Loop, _: sphtud.event.PollReason) sphtud.event.Loop.PollResult {
     const self: *LibInputInputBackend = @ptrCast(@alignCast(ctx));
     self.pollError() catch |e| {
         std.log.err("input handling error, shutting down input loop: {t}", .{e});

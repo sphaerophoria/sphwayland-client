@@ -45,7 +45,7 @@ const Handler = struct {
     parent: *NullRenderBackend,
     renderer: *rendering.Renderer,
 
-    fn poll(ctx: ?*anyopaque, _: *sphtud.event.LoopSphalloc, _: sphtud.event.PollReason) sphtud.event.LoopSphalloc.PollResult {
+    fn poll(ctx: ?*anyopaque, _: *sphtud.event.Loop, _: sphtud.event.PollReason) sphtud.event.Loop.PollResult {
         const self: *Handler = @ptrCast(@alignCast(ctx));
 
         self.pollError() catch |e| {
@@ -69,7 +69,7 @@ const Handler = struct {
     fn close(_: ?*anyopaque) void {}
 };
 
-fn makeHandlers(ctx: ?*anyopaque, alloc: std.mem.Allocator, renderer: *rendering.Renderer, _: *CompositorState) anyerror![]sphtud.event.LoopSphalloc.Handler {
+fn makeHandlers(ctx: ?*anyopaque, alloc: std.mem.Allocator, renderer: *rendering.Renderer, _: *CompositorState) anyerror![]sphtud.event.Loop.Handler {
     const self: *NullRenderBackend = @ptrCast(@alignCast(ctx));
 
     const handler_ctx = try alloc.create(Handler);
@@ -78,7 +78,7 @@ fn makeHandlers(ctx: ?*anyopaque, alloc: std.mem.Allocator, renderer: *rendering
         .renderer = renderer,
     };
 
-    const handlers = try alloc.alloc(sphtud.event.LoopSphalloc.Handler, 1);
+    const handlers = try alloc.alloc(sphtud.event.Loop.Handler, 1);
     handlers[0] = .{
         .ptr = handler_ctx,
         .vtable = &.{

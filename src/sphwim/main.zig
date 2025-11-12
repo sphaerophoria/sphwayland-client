@@ -39,12 +39,12 @@ const PeriodicMemoryDumper = struct {
         };
     }
 
-    const vtable = sphtud.event.LoopSphalloc.Handler.VTable{
+    const vtable = sphtud.event.Loop.Handler.VTable{
         .poll = poll,
         .close = close,
     };
 
-    fn handler(self: *PeriodicMemoryDumper) sphtud.event.LoopSphalloc.Handler {
+    fn handler(self: *PeriodicMemoryDumper) sphtud.event.Loop.Handler {
         return .{
             .ptr = self,
             .fd = self.timer,
@@ -56,7 +56,7 @@ const PeriodicMemoryDumper = struct {
         };
     }
 
-    fn poll(ctx: ?*anyopaque, _: *sphtud.event.LoopSphalloc, _: sphtud.event.PollReason) sphtud.event.LoopSphalloc.PollResult {
+    fn poll(ctx: ?*anyopaque, _: *sphtud.event.Loop, _: sphtud.event.PollReason) sphtud.event.Loop.PollResult {
         const self: *PeriodicMemoryDumper = @ptrCast(@alignCast(ctx));
         self.pollError() catch return .complete;
         return .in_progress;
@@ -107,7 +107,7 @@ pub fn main() !void {
 
     var system_running: bool = true;
 
-    const render_backend = try backend.initBackend(root_alloc.general(), &system_running);
+    const render_backend = try backend.initBackend(root_alloc.arena(), root_alloc.expansion(), &system_running);
     defer render_backend.deinit();
 
     var gbm_context = try system_gl.GbmContext.init(render_backend.initial_res.width, render_backend.initial_res.height, render_backend.preferred_gpu);
@@ -144,9 +144,9 @@ pub fn main() !void {
         solid_color_renderer,
     );
 
-    var loop = try sphtud.event.LoopSphalloc.init(
+    var loop = try sphtud.event.Loop.init(
         root_alloc.arena(),
-        root_alloc.block_alloc.allocator(),
+        root_alloc.expansion(),
     );
 
     var server = try wayland.makeWaylandServer(

@@ -31,11 +31,11 @@ compositor_state: *CompositorState,
 gbm_context: *const system_gl.GbmContext,
 
 interface_registry: InterfaceRegistry,
-wl_surfaces: sphtud.util.AutoHashMapSphalloc(WlSurfaceId, Surface),
-wl_buffers: sphtud.util.AutoHashMapSphalloc(WlBufferId, *RefCountedRenderBuffer),
-zwp_params: sphtud.util.AutoHashMapSphalloc(ZwpBufferParamsId, ?BufferParams),
-xdg_surfaces: sphtud.util.AutoHashMapSphalloc(XdgSurfaceId, WlSurfaceId),
-windows: sphtud.util.AutoHashMapSphalloc(XdgToplevelId, Window),
+wl_surfaces: sphtud.util.AutoHashMap(WlSurfaceId, Surface),
+wl_buffers: sphtud.util.AutoHashMap(WlBufferId, *RefCountedRenderBuffer),
+zwp_params: sphtud.util.AutoHashMap(ZwpBufferParamsId, ?BufferParams),
+xdg_surfaces: sphtud.util.AutoHashMap(XdgSurfaceId, WlSurfaceId),
+windows: sphtud.util.AutoHashMap(XdgToplevelId, Window),
 
 const typical_surfaces = 2;
 const max_surfaces = 100;
@@ -50,7 +50,7 @@ const typical_buffers = typical_surfaces * 2;
 const max_buffers = max_surfaces * 2;
 const display_id = 1;
 
-const vtable = sphtud.event.LoopSphalloc.Handler.VTable{
+const vtable = sphtud.event.Loop.Handler.VTable{
     .poll = poll,
     .close = close,
 };
@@ -88,15 +88,15 @@ pub fn init(
         .compositor_state = compositor_state,
         .gbm_context = gbm_context,
         .interface_registry = try .init(alloc),
-        .wl_surfaces = try .init(alloc.arena(), alloc.block_alloc.allocator(), typical_surfaces, max_surfaces),
-        .xdg_surfaces = try .init(alloc.arena(), alloc.block_alloc.allocator(), typical_surfaces, max_surfaces),
-        .windows = try .init(alloc.arena(), alloc.block_alloc.allocator(), typical_windows, max_windows),
-        .wl_buffers = try .init(alloc.arena(), alloc.block_alloc.allocator(), typical_surfaces, max_surfaces),
-        .zwp_params = try .init(alloc.arena(), alloc.block_alloc.allocator(), typical_zwp_buffers, max_zwp_buffers),
+        .wl_surfaces = try .init(alloc.arena(), alloc.expansion(), typical_surfaces, max_surfaces),
+        .xdg_surfaces = try .init(alloc.arena(), alloc.expansion(), typical_surfaces, max_surfaces),
+        .windows = try .init(alloc.arena(), alloc.expansion(), typical_windows, max_windows),
+        .wl_buffers = try .init(alloc.arena(), alloc.expansion(), typical_surfaces, max_surfaces),
+        .zwp_params = try .init(alloc.arena(), alloc.expansion(), typical_zwp_buffers, max_zwp_buffers),
     };
 }
 
-pub fn handler(self: *Connection) sphtud.event.LoopSphalloc.Handler {
+pub fn handler(self: *Connection) sphtud.event.Loop.Handler {
     return .{
         .ptr = self,
         .vtable = &vtable,
@@ -129,7 +129,7 @@ pub fn updateRenderableHandle(self: *Connection, surface: WlSurfaceId, handle: C
     self.wl_surfaces.getPtr(surface).?.committed_buffer_handle = handle;
 }
 
-fn poll(ctx: ?*anyopaque, _: *sphtud.event.LoopSphalloc, _: sphtud.event.PollReason) sphtud.event.LoopSphalloc.PollResult {
+fn poll(ctx: ?*anyopaque, _: *sphtud.event.Loop, _: sphtud.event.PollReason) sphtud.event.Loop.PollResult {
     const self: *Connection = @ptrCast(@alignCast(ctx));
     var message_buf: [4096]u8 = undefined;
     var diagnostics = HandleMessageDiagnostics{
@@ -692,13 +692,13 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
 }
 
 const InterfaceRegistry = struct {
-    inner: sphtud.util.AutoHashMapSphalloc(u32, Bindings.WaylandInterfaceType),
+    inner: sphtud.util.AutoHashMap(u32, Bindings.WaylandInterfaceType),
 
     fn init(sphalloc: *sphtud.alloc.Sphalloc) !InterfaceRegistry {
         var ret: InterfaceRegistry = .{
             .inner = try .init(
                 sphalloc.arena(),
-                sphalloc.block_alloc.allocator(),
+                sphalloc.expansion(),
                 128,
                 4096,
             ),
