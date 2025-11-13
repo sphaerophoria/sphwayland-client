@@ -26,6 +26,8 @@ fn bindInterfaces(client: *wlclient.Client(wlb)) !BoundInterfaces {
     var wl_seat: ?wlb.WlSeat = null;
 
     while (try it.getAvailableEvent()) |event| {
+        defer event.deinit();
+
         switch (event.event) {
             .wl_display => |parsed| {
                 switch (parsed) {
@@ -344,6 +346,8 @@ pub const Window = struct {
         self.clearInputEvents();
 
         while (try it.getAvailableEvent()) |event| {
+            defer event.deinit();
+
             if (try self.handleEvent(event, gl_ctx)) {
                 return true;
             }
@@ -534,7 +538,10 @@ pub const Window = struct {
                         .x = params.surface_x.tof32(),
                         .y = params.surface_y.tof32(),
                     } };
-                    try self.pending_input_events.append(self.alloc, pointer_update);
+                    self.pending_input_events.append(self.alloc, pointer_update) catch |e| {
+                        std.debug.print("{d}\n", .{self.pending_input_events.len});
+                        return e;
+                    };
                 },
                 .button => |params| {
                     if (params.button == c.BTN_LEFT) {

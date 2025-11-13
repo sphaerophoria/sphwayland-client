@@ -12,7 +12,6 @@ pub fn Client(comptime Bindings: type) type {
     return struct {
         interfaces: InterfaceRegistry(Bindings),
 
-        fd_pool: *wlio.FdPool,
         stream: std.net.Stream,
         stream_reader: *wlio.Reader,
 
@@ -31,15 +30,11 @@ pub fn Client(comptime Bindings: type) type {
 
             const interfaces = try InterfaceRegistry(Bindings).init(alloc, expansion_alloc, registry);
 
-            const fd_pool = try alloc.create(wlio.FdPool);
-            fd_pool.* = try .init(alloc, 10, 1000);
-
             const stream_reader = try alloc.create(wlio.Reader);
-            stream_reader.* = try wlio.Reader.init(alloc, fd_pool, stream);
+            stream_reader.* = try wlio.Reader.init(alloc, stream);
 
             return .{
                 .interfaces = interfaces,
-                .fd_pool = fd_pool,
                 .stream_reader = stream_reader,
                 .stream = stream,
                 .stream_writer = stream_writer,
@@ -47,6 +42,7 @@ pub fn Client(comptime Bindings: type) type {
         }
 
         pub fn deinit(self: *Self) void {
+            self.stream_reader.deinit();
             self.stream.close();
         }
 
@@ -165,7 +161,17 @@ pub fn InterfaceRegistry(comptime Bindings: type) type {
 }
 
 pub fn Event(comptime Bindings: type) type {
-    return struct { object_id: u32, event: Bindings.WaylandIncomingMessage, fd: ?std.posix.fd_t };
+    return struct {
+        object_id: u32,
+        event: Bindings.WaylandIncomingMessage,
+        fd: ?std.posix.fd_t,
+
+        pub fn deinit(self: @This()) void {
+            if (self.fd) |fd| {
+                std.posix.close(fd);
+            }
+        }
+    };
 }
 
 pub fn EventIt(comptime Bindings: type) type {
@@ -183,15 +189,6 @@ pub fn EventIt(comptime Bindings: type) type {
         // NOTE: Output data is backed by internal buffer and is invalidated on next call to next()
         pub fn retrieveEvents(self: *Self) !void {
             try self.client.stream_reader.interface.fillMore();
-        }
-
-        pub fn getEventBlocking(self: *Self) !Event(Bindings) {
-            while (true) {
-                if (try self.getAvailableEvent()) |v| {
-                    return v;
-                }
-                try self.wait();
-            }
         }
 
         pub fn getAvailableEvent(self: *Self) !?Event(Bindings) {

@@ -4,7 +4,7 @@ const rendering = @import("../rendering.zig");
 const Bindings = @import("wayland_bindings");
 const wlio = @import("wlio");
 const Reader = wlio.Reader;
-const FdPool = wlio.FdPool;
+const FdPool = @import("../FdPool.zig");
 const CompositorState = @import("../CompositorState.zig");
 const system_gl = @import("../system_gl.zig");
 const server = @import("../wayland.zig");
@@ -70,10 +70,11 @@ pub fn init(
     const io_writer = &stream_writer.interface;
 
     const fd_pool = try alloc.arena().create(FdPool);
-    fd_pool.* = try .init(alloc.arena(), 8, 100);
+    fd_pool.* = try .init(alloc, 8, 100);
 
+    // FIXME: Make sure we're closing fds
     const stream_reader = try alloc.arena().create(Reader);
-    stream_reader.* = try Reader.init(alloc.arena(), fd_pool, connection.stream);
+    stream_reader.* = try Reader.init(alloc.arena(), connection.stream);
     const io_reader = &stream_reader.interface;
 
     return .{
@@ -307,6 +308,11 @@ fn pollError(self: *Connection, diagnostics: *HandleMessageDiagnostics) !void {
                 }
 
                 return error.NoFd;
+            };
+
+            self.fd_pool.register(fd.?) catch |e| {
+                std.posix.close(fd.?);
+                return e;
             };
         }
 

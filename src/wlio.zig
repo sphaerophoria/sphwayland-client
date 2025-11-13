@@ -172,44 +172,15 @@ fn roundUp(val: anytype, mul: @TypeOf(val)) @TypeOf(val) {
     return ((val - 1) / mul + 1) * mul;
 }
 
-// FIXME: This should live in sphtud or something?
-pub const FdPool = struct {
-    inner: sphtud.util.AutoHashMap(std.posix.fd_t, void),
-
-    pub fn init(alloc: std.mem.Allocator, typical_files: usize, max_files: usize) !FdPool {
-        return .{
-            .inner = try .init(alloc, .linear(alloc), typical_files, max_files),
-        };
-    }
-
-    pub fn register(self: *FdPool, fd: std.posix.fd_t) !void {
-        try self.inner.put(fd, {});
-    }
-
-    pub fn close(self: *FdPool, fd: std.posix.fd_t) void {
-        std.posix.close(fd);
-        _ = self.inner.remove(fd);
-    }
-
-    pub fn closeAll(self: *FdPool) void {
-        var it = self.inner.iter();
-        while (it.next()) |item| {
-            std.posix.close(item.key.*);
-        }
-    }
-};
-
 pub const Reader = struct {
     socket: std.net.Stream,
-    fd_pool: *FdPool,
     fd_list: sphtud.util.CircularBuffer(std.posix.fd_t),
     last_res: std.os.linux.E = .SUCCESS,
     interface: std.Io.Reader,
 
-    pub fn init(alloc: std.mem.Allocator, fd_pool: *FdPool, socket: std.net.Stream) !Reader {
+    pub fn init(alloc: std.mem.Allocator, socket: std.net.Stream) !Reader {
         return .{
             .socket = socket,
-            .fd_pool = fd_pool,
             .fd_list = .{
                 // 100 file descriptors received before we handle any of them seems
                 // like an insanely large number for a single connection
@@ -224,6 +195,13 @@ pub const Reader = struct {
                 .end = 0,
             },
         };
+    }
+
+    pub fn deinit(self: *Reader) void {
+        var it = self.fd_list.iter();
+        while (it.next()) |fd| {
+            std.posix.close(fd);
+        }
     }
 
     fn stream(r: *std.Io.Reader, writer: *std.Io.Writer, limit: std.Io.Limit) error{ EndOfStream, ReadFailed, WriteFailed }!usize {
@@ -270,15 +248,9 @@ pub const Reader = struct {
                     const fd: c_int = std.mem.bytesToValue(c_int, control[offs..][0..4]);
                     offs += 4;
 
-                    self.fd_pool.register(fd) catch {
-                        std.log.err("Dropped file descriptor", .{});
-                        std.posix.close(fd);
-                        break :blk;
-                    };
-
                     self.fd_list.pushNoClobber(fd) catch {
                         std.log.err("Dropped file descriptor", .{});
-                        self.fd_pool.close(fd);
+                        std.posix.close(fd);
                         break :blk;
                     };
                 }
