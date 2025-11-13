@@ -538,10 +538,7 @@ pub const Window = struct {
                         .x = params.surface_x.tof32(),
                         .y = params.surface_y.tof32(),
                     } };
-                    self.pending_input_events.append(self.alloc, pointer_update) catch |e| {
-                        std.debug.print("{d}\n", .{self.pending_input_events.len});
-                        return e;
-                    };
+                    try self.pending_input_events.append(self.alloc, pointer_update);
                 },
                 .button => |params| {
                     if (params.button == c.BTN_LEFT) {

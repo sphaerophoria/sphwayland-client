@@ -185,6 +185,8 @@ pub fn notifyCursorPosition(self: *Connection, surface_id: WlSurfaceId, x: i32, 
             });
             item.val.current_surface = surface_id;
         }
+
+        try interface.frame(self.io_writer, .{});
     }
     try self.io_writer.flush();
 }
