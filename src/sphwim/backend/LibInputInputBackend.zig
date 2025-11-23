@@ -99,6 +99,24 @@ fn pollError(self: *LibInputInputBackend) anyerror!void {
 
                 self.compositor_state.notifyCursorPosition(@floatCast(x), @floatCast(y));
             },
+            system.LIBINPUT_EVENT_POINTER_BUTTON => {
+                const pointer_event = system.libinput_event_get_pointer_event(next_event);
+
+                const button = system.libinput_event_pointer_get_button(pointer_event);
+                const state = system.libinput_event_pointer_get_button_state(pointer_event);
+
+                switch (buttonWithState(button, state)) {
+                    buttonWithState(system.BTN_LEFT, system.LIBINPUT_BUTTON_STATE_PRESSED) => {
+                        self.compositor_state.notifyMouse1Down();
+                    },
+                    buttonWithState(system.BTN_LEFT, system.LIBINPUT_BUTTON_STATE_RELEASED) => {
+                        self.compositor_state.notifyMouse1Up();
+                    },
+                    else => {
+                        input_logger.debug("unused button event 0x{x} {d}", .{ button, state });
+                    },
+                }
+            },
             else => {
                 input_logger.debug("unhandled input event for {d}", .{next_event_type});
             },
@@ -110,4 +128,8 @@ fn close(ctx: ?*anyopaque) void {
     const self: *LibInputInputBackend = @ptrCast(@alignCast(ctx));
     _ = system.libinput_unref(self.input_ctx);
     _ = system.udev_unref(self.udev_ctx);
+}
+
+fn buttonWithState(button: u32, state: u32) u64 {
+    return (@as(u64, button) << 32) | state;
 }
