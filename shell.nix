@@ -18,6 +18,7 @@ pkgs.mkShell {
     libinput
     systemd
     black
+    libxkbcommon
   ];
 }
 

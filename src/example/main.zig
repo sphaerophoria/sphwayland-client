@@ -57,6 +57,13 @@ pub fn main() !void {
                 .mouse1_up => {
                     std.debug.print("Mouse released\n", .{});
                 },
+                .key => |k| {
+                    const cp = fba.end_index;
+                    defer fba.end_index = cp;
+
+                    const s = try k.toUtf8(fba.allocator());
+                    std.debug.print("Got key: {s}\n", .{s});
+                },
             }
         }
 
