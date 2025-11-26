@@ -288,6 +288,11 @@ pub fn build(b: *std.Build) !void {
     const server_bindings = builder.makeServerBindings(wlgen, wlio_mod);
     const wm = try builder.makeWm(wlio_mod, server_bindings, sphtud, wl_cmsg, sphwindow);
 
+    const wm_test = b.addTest(.{
+        .name = "sphwim_test",
+        .root_module = wm.root_module,
+    });
+
     if (check) {
         b.getInstallStep().dependOn(&example.step);
         b.getInstallStep().dependOn(&wm.step);
@@ -298,5 +303,6 @@ pub fn build(b: *std.Build) !void {
         b.installArtifact(wm);
         b.installArtifact(wlgen);
         b.installArtifact(wait_for_wl);
+        b.installArtifact(wm_test);
     }
 }

@@ -143,18 +143,20 @@ pub const Renderer = struct {
 
         defer self.frame_gl_alloc.reset();
 
-        const num_renderables = renderables.storage.count();
+        const num_renderables = renderables.count();
 
-        var renderable_it = renderables.storage.iter();
         var depth: usize = 0;
-        while (renderable_it.next()) |item| {
+        for (0..renderables.count()) |idx| {
+            const handle = CompositorState.Renderables.Handle.fromIdx(idx);
+            const renderable = renderables.get(handle);
+
             defer depth += 1;
-            self.renderWindowSurface(item.val.*, depth, num_renderables) catch |e| {
+            self.renderWindowSurface(renderable, depth, num_renderables) catch |e| {
                 logger.warn("failed to import texture {t}, skipping window", .{e});
                 continue;
             };
 
-            const window_border = geometry.WindowBorder.fromRenderable(item.val.*);
+            const window_border = geometry.WindowBorder.fromRenderable(renderable);
 
             self.renderWindowTrim(window_border.titleQuad(), depth, num_renderables);
             self.renderWindowTrim(window_border.windowTrim(), depth, num_renderables);
@@ -177,8 +179,8 @@ pub const Renderer = struct {
         const texture = try importTexture(self.frame_gl_alloc, self.egl_ctx, buffer);
 
         const transform = quadTransform(.{
-            .cx = renderable.cx,
-            .cy = renderable.cy,
+            .cx = renderable.position.cx,
+            .cy = renderable.position.cy,
             .width = @intCast(renderable.buffer.width),
             .height = @intCast(renderable.buffer.height),
         }, self.compositor_state.compositor_res);
