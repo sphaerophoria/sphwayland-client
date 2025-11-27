@@ -87,7 +87,7 @@ fn makeHandlers(ctx: ?*anyopaque, alloc: std.mem.Allocator, renderer: *rendering
 }
 
 fn pollError(self: *WaylandRenderBackend, renderer: *rendering.Renderer, compositor_state: *CompositorState) !void {
-    if (try self.window.service(OutstandingBufNotifier{
+    if (try self.window.service(GlCtxProxy{
         .outstanding_buffers = &self.outstanding_buffers,
         .renderer = renderer,
     })) {
@@ -130,7 +130,7 @@ fn displayBuffer(self: *WaylandRenderBackend, renderer: *rendering.Renderer, buf
     try self.outstanding_buffers.put(buf_id, buffer);
 }
 
-const OutstandingBufNotifier = struct {
+const GlCtxProxy = struct {
     outstanding_buffers: *sphtud.util.AutoHashMap(u32, system_gl.GbmContext.Buffer),
     renderer: *rendering.Renderer,
 
@@ -141,5 +141,12 @@ const OutstandingBufNotifier = struct {
         };
 
         self.renderer.releaseBuffer(buffer);
+    }
+
+    pub fn requestResize(self: @This(), width: i32, height: i32) !void {
+        // sphwim does not yet support being resized, just ingore
+        _ = self;
+        _ = width;
+        _ = height;
     }
 };

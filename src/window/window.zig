@@ -162,10 +162,23 @@ pub const DefaultGlContext = struct {
 
         self.gbm_ctx.unlock(gbm_handle.value);
     }
+
+    pub fn requestResize(self: *DefaultGlContext, width: i32, height: i32) !void {
+        if (width == 0 and height == 0) return;
+
+        try self.egl_ctx.updateSurface(null);
+        try self.gbm_ctx.updateSurfaceSize(@bitCast(width), @bitCast(height));
+        try self.egl_ctx.updateSurface(self.gbm_ctx.surface);
+    }
 };
 
 const NullGlCtx = struct {
     pub fn notifyGlBufferRelease(_: NullGlCtx, _: u32) void {}
+
+    // Window writes down pending buffer config. If we don't have a opengl
+    // context yet, we have no buffer to resize. The initial buffer size can
+    // be set according to what is stashed in the Window.pending_surface_info
+    pub fn requestResize(_: NullGlCtx, _: i32, _: i32) !void {}
 };
 
 pub const RenderBuffer = struct {
@@ -201,6 +214,7 @@ pub const Window = struct {
     frame_callback: wlb.WlCallback,
     wl_pointer: wlb.WlPointer,
 
+    first_configure: bool = true,
     wants_frame: bool = false,
 
     format_info: struct {
@@ -215,6 +229,11 @@ pub const Window = struct {
 
         preferred_gpu: ?u64 = null,
         preferred_format: ?FormatModifierPair = null,
+    },
+
+    pending_surface_info: struct {
+        width: i32 = 0,
+        height: i32 = 0,
     },
 
     alloc: sphtud.util.ExpansionAlloc,
@@ -302,6 +321,7 @@ pub const Window = struct {
             .alloc = expansion_alloc,
             .input_events = try .init(arena, expansion_alloc, typical_input_events, max_input_events),
             .pending_input_events = try .init(arena, expansion_alloc, typical_input_events, max_input_events),
+            .pending_surface_info = .{},
             .format_info = .{},
         };
         errdefer ret.deinit();
@@ -446,12 +466,19 @@ pub const Window = struct {
                     },
                 }
             },
-            .xdg_surface => |parsed| {
-                try self.xdg_surface.ackConfigure(self.client.writer(), .{
-                    .serial = parsed.configure.serial,
-                });
+            .xdg_surface => |parsed| switch (parsed) {
+                .configure => |params| {
+                    try self.xdg_surface.ackConfigure(self.client.writer(), .{
+                        .serial = params.serial,
+                    });
 
-                self.wants_frame = true;
+                    try gl_ctx.requestResize(self.pending_surface_info.width, self.pending_surface_info.height);
+
+                    if (self.first_configure) {
+                        self.first_configure = false;
+                        self.wants_frame = true;
+                    }
+                },
             },
             .xdg_wm_base => |parsed| {
                 try self.xdg_wm_base.pong(self.client.writer(), .{
@@ -462,6 +489,10 @@ pub const Window = struct {
                 switch (parsed) {
                     .close => {
                         return true;
+                    },
+                    .configure => |params| {
+                        self.pending_surface_info.width = params.width;
+                        self.pending_surface_info.height = params.height;
                     },
                     else => {
                         std.log.debug("Unhandled toplevel event {any}", .{parsed});
