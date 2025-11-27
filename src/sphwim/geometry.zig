@@ -50,13 +50,13 @@ pub const WindowBorder = struct {
         close,
     };
 
-    pub fn fromRenderable(renderable: CompositorState.Renderable) WindowBorder {
+    pub fn fromRenderable(window: CompositorState.Window) WindowBorder {
         return .{
             // Windows don't move yet
-            .surface_cx = renderable.position.cx,
-            .surface_cy = renderable.position.cy,
-            .surface_width = @intCast(renderable.buffer.width),
-            .surface_height = @intCast(renderable.buffer.height),
+            .surface_cx = window.position.cx,
+            .surface_cy = window.position.cy,
+            .surface_width = @intCast(window.buffer.width),
+            .surface_height = @intCast(window.buffer.height),
         };
     }
 

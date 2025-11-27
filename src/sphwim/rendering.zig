@@ -151,28 +151,28 @@ pub const Renderer = struct {
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT);
         self.background_animation_state = @mod(self.background_animation_state + delta / 4.0, 2.0);
 
-        const renderables = &self.compositor_state.renderables;
+        const windows = &self.compositor_state.windows;
 
         defer self.frame_gl_alloc.reset();
 
-        const num_renderables = renderables.count();
+        const num_windows = windows.count();
 
-        var renderable_it = self.compositor_state.renderables.iter();
+        var window_it = self.compositor_state.windows.iter();
 
         var hover_found: bool = false;
         const cursor_x: i32 = @intFromFloat(self.compositor_state.cursor_pos.x);
         const cursor_y: i32 = @intFromFloat(self.compositor_state.cursor_pos.y);
         var depth: usize = 0;
-        while (renderable_it.next()) {
+        while (window_it.next()) {
             defer depth += 1;
 
-            const renderable = renderable_it.get();
-            self.renderWindowSurface(renderable, depth, num_renderables) catch |e| {
+            const window = window_it.get();
+            self.renderWindowSurface(window, depth, num_windows) catch |e| {
                 logger.warn("failed to import texture {t}, skipping window", .{e});
                 continue;
             };
 
-            const window_border = geometry.WindowBorder.fromRenderable(renderable);
+            const window_border = geometry.WindowBorder.fromRenderable(window);
 
             var close_hovered = false;
             if (!hover_found) {
@@ -183,9 +183,9 @@ pub const Renderer = struct {
             }
 
             const close_color = if (close_hovered) close_hover_color else close_default_color;
-            self.renderSolidQuad(window_border.closeQuad(), close_color, depth, 1, num_renderables);
-            self.renderSolidQuad(window_border.titleQuad(), window_border_color, depth, 2, num_renderables);
-            self.renderSolidQuad(window_border.windowTrim(), window_border_color, depth, 2, num_renderables);
+            self.renderSolidQuad(window_border.closeQuad(), close_color, depth, 1, num_windows);
+            self.renderSolidQuad(window_border.titleQuad(), window_border_color, depth, 2, num_windows);
+            self.renderSolidQuad(window_border.windowTrim(), window_border_color, depth, 2, num_windows);
         }
 
         self.renderCursor();
@@ -200,29 +200,29 @@ pub const Renderer = struct {
         return front_buf;
     }
 
-    fn renderWindowSurface(self: *Renderer, renderable: CompositorState.Renderable, depth: usize, num_renderables: usize) !void {
-        const buffer = renderable.buffer;
+    fn renderWindowSurface(self: *Renderer, window: CompositorState.Window, depth: usize, num_windows: usize) !void {
+        const buffer = window.buffer;
         const texture = try importTexture(self.frame_gl_alloc, self.egl_ctx, buffer);
 
         const transform = quadTransform(.{
-            .cx = renderable.position.cx,
-            .cy = renderable.position.cy,
-            .width = @intCast(renderable.buffer.width),
-            .height = @intCast(renderable.buffer.height),
+            .cx = window.position.cx,
+            .cy = window.position.cy,
+            .width = @intCast(window.buffer.width),
+            .height = @intCast(window.buffer.height),
         }, self.compositor_state.compositor_res);
 
         var depth_f: f32 = @floatFromInt(depth);
-        depth_f /= @floatFromInt(num_renderables);
+        depth_f /= @floatFromInt(num_windows);
         self.image_renderer.renderTextureAtDepth(texture, transform, depth_f);
     }
 
-    fn renderSolidQuad(self: *Renderer, quad: geometry.PixelQuad, color: sphtud.math.Vec3, depth: usize, sub_order: f32, num_renderables: usize) void {
+    fn renderSolidQuad(self: *Renderer, quad: geometry.PixelQuad, color: sphtud.math.Vec3, depth: usize, sub_order: f32, num_windows: usize) void {
         const transform = quadTransform(quad, self.compositor_state.compositor_res);
         var depth_f: f32 = @floatFromInt(depth);
         const max_sub_order = 10.0;
         std.debug.assert(sub_order < max_sub_order);
         depth_f += sub_order / max_sub_order;
-        depth_f /= @floatFromInt(num_renderables);
+        depth_f /= @floatFromInt(num_windows);
         self.solid_color_renderer.render(self.fullscreen_quad, .{
             .color = color,
             .transform = transform.inner,

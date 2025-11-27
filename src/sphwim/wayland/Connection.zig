@@ -131,7 +131,7 @@ pub fn closeWindow(self: *Connection, toplevel_id: XdgToplevelId) !void {
     try self.io_writer.flush();
 }
 
-pub fn updateRenderableHandle(self: *Connection, surface: WlSurfaceId, handle: CompositorState.Renderables.Handle) void {
+pub fn updateRenderableHandle(self: *Connection, surface: WlSurfaceId, handle: CompositorState.Windows.Handle) void {
     self.wl_surfaces.getPtr(surface).?.committed_buffer_handle = handle;
 }
 
@@ -271,7 +271,7 @@ fn close(ctx: ?*anyopaque) void {
     var surface_it = self.wl_surfaces.iter();
     while (surface_it.next()) |surface| {
         if (surface.val.committed_buffer_handle) |h| {
-            self.compositor_state.removeRenderable(h);
+            self.compositor_state.removeWindow(h);
         }
     }
 
@@ -534,14 +534,14 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
                     surface.committed_buffer = next_buf;
 
                     if (surface.committed_buffer_handle) |h| {
-                        self.compositor_state.renderables.swapBuffer(
+                        self.compositor_state.windows.swapBuffer(
                             h,
                             next_buf.render_buffer,
                             next_buf.buf_id,
                         );
                     } else blk: {
                         const toplevel_id = surface.toplevel_id orelse break :blk;
-                        surface.committed_buffer_handle = try self.compositor_state.pushRenderable(
+                        surface.committed_buffer_handle = try self.compositor_state.pushWindow(
                             self,
                             wl_surface_id,
                             next_buf.render_buffer,
@@ -927,7 +927,7 @@ const Surface = struct {
 
     // Buffer currently committed
     committed_buffer: ?*RefCountedRenderBuffer = null,
-    committed_buffer_handle: ?CompositorState.Renderables.Handle = null,
+    committed_buffer_handle: ?CompositorState.Windows.Handle = null,
 
     callback_id: ?u32 = null,
     outstanding_xdg_configure: ?u32 = null,
@@ -943,7 +943,7 @@ const Surface = struct {
         }
 
         if (self.committed_buffer_handle) |handle| {
-            compositor_state.removeRenderable(handle);
+            compositor_state.removeWindow(handle);
         }
     }
 };

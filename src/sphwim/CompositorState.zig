@@ -10,7 +10,7 @@ scratch: *sphtud.alloc.BufAllocator,
 compositor_res: rendering.Resolution,
 drag_state: DragState,
 cursor_pos: CursorPos,
-renderables: Renderables,
+windows: Windows,
 
 const CursorPos = struct {
     x: f32,
@@ -19,7 +19,7 @@ const CursorPos = struct {
 
 const DragState = union(enum) {
     moving_window: struct {
-        id: Renderables.Handle,
+        id: Windows.Handle,
         last: CursorPos,
     },
     none,
@@ -36,12 +36,12 @@ pub fn init(alloc: *sphtud.alloc.Sphalloc, scratch: *sphtud.alloc.BufAllocator, 
             .y = @floatFromInt(current_res.height / 2),
         },
         .drag_state = .none,
-        .renderables = try .init(alloc),
+        .windows = try .init(alloc),
     };
 }
 
 pub fn requestFrame(self: *CompositorState) !void {
-    const source_infos = self.renderables.items(.source_info);
+    const source_infos = self.windows.items(.source_info);
     for (source_infos.inner) |si| {
         try si.connection.requestFrame(si.surface);
     }
@@ -60,7 +60,7 @@ pub fn notifyCursorPosition(self: *CompositorState, x: f32, y: f32) void {
 
     switch (self.drag_state) {
         .moving_window => |*params| {
-            const position = self.renderables.items(.position).getPtr(params.id);
+            const position = self.windows.items(.position).getPtr(params.id);
             position.cx += @intFromFloat(self.cursor_pos.x - params.last.x);
             position.cy += @intFromFloat(self.cursor_pos.y - params.last.y);
             params.last = self.cursor_pos;
@@ -69,17 +69,17 @@ pub fn notifyCursorPosition(self: *CompositorState, x: f32, y: f32) void {
     }
 }
 
-pub fn pushRenderable(
+pub fn pushWindow(
     self: *CompositorState,
     connection: *wayland.Connection,
     surface: wayland.Connection.WlSurfaceId,
     buffer: rendering.RenderBuffer,
     buffer_id: wayland.Connection.WlBufferId,
     window_id: wayland.Connection.XdgToplevelId,
-) !Renderables.Handle {
-    const handle = try self.renderables.addOne();
+) !Windows.Handle {
+    const handle = try self.windows.addOne();
 
-    self.renderables.set(handle, .{
+    self.windows.set(handle, .{
         .source_info = .{
             .connection = connection,
             .surface = surface,
@@ -96,7 +96,7 @@ pub fn pushRenderable(
     return handle;
 }
 
-pub fn removeRenderable(self: *CompositorState, handle: Renderables.Handle) void {
+pub fn removeWindow(self: *CompositorState, handle: Windows.Handle) void {
     switch (self.drag_state) {
         .moving_window => |move_state| {
             if (move_state.id.inner == handle.inner) {
@@ -106,8 +106,8 @@ pub fn removeRenderable(self: *CompositorState, handle: Renderables.Handle) void
         .none => {},
     }
 
-    self.renderables.orderedRemove(handle);
-    self.healRenderableReferences(handle.inner, self.renderables.count(), .removal);
+    self.windows.orderedRemove(handle);
+    self.healWindowReferences(handle.inner, self.windows.count(), .removal);
 }
 
 pub fn notifyMouse1Up(self: *CompositorState) void {
@@ -116,19 +116,19 @@ pub fn notifyMouse1Up(self: *CompositorState) void {
 
 const WindowFgResult = struct {
     location: geometry.WindowBorder.Location,
-    handle: Renderables.Handle,
+    handle: Windows.Handle,
 };
 
-fn moveToFront(self: *CompositorState, handle: Renderables.Handle) void {
-    self.renderables.moveToEnd(handle);
-    self.healRenderableReferences(handle.inner, self.renderables.count(), .{ .rotation = -1 });
+fn moveToFront(self: *CompositorState, handle: Windows.Handle) void {
+    self.windows.moveToEnd(handle);
+    self.healWindowReferences(handle.inner, self.windows.count(), .{ .rotation = -1 });
 }
 
 fn findClickedWindow(self: *CompositorState) !?WindowFgResult {
-    var it = self.renderables.iter();
+    var it = self.windows.iter();
     while (it.next()) {
-        const renderable = it.get();
-        const window_border = geometry.WindowBorder.fromRenderable(renderable);
+        const window = it.get();
+        const window_border = geometry.WindowBorder.fromRenderable(window);
         const cursor_x: i32 = @intFromFloat(self.cursor_pos.x);
         const cursor_y: i32 = @intFromFloat(self.cursor_pos.y);
 
@@ -155,7 +155,7 @@ pub fn notifyMouse1Down(self: *CompositorState) !void {
             };
         },
         .close => {
-            const source_info = self.renderables.items(.source_info).get(res.handle);
+            const source_info = self.windows.items(.source_info).get(res.handle);
             try source_info.connection.closeWindow(source_info.window);
         },
         .surface => {},
@@ -171,7 +171,7 @@ pub const SourceInfo = struct {
     buffer_id: wayland.Connection.WlBufferId,
 };
 
-pub const Renderable = struct {
+pub const Window = struct {
     source_info: SourceInfo,
     position: struct {
         cx: i32,
@@ -210,11 +210,11 @@ test "oldIndex" {
     try std.testing.expectEqual(6, oldIndex(3, 6, 5, .removal));
 }
 
-fn healRenderableReferences(self: *CompositorState, start: usize, end: usize, reason: HealReason) void {
-    const source_infos = self.renderables.items(.source_info);
+fn healWindowReferences(self: *CompositorState, start: usize, end: usize, reason: HealReason) void {
+    const source_infos = self.windows.items(.source_info);
 
     for (source_infos.inner[start..end], start..) |si, new_idx| {
-        const new_handle = Renderables.Handle{ .inner = new_idx };
+        const new_handle = Windows.Handle{ .inner = new_idx };
         si.connection.updateRenderableHandle(si.surface, new_handle);
     }
 
@@ -236,7 +236,7 @@ fn calcMultiArrayListPageNumElems(page_size_log2: u8) usize {
     var size_per_item: usize = 0;
     var worst_case_pad: usize = 0;
 
-    inline for (std.meta.fields(Renderable)) |field| {
+    inline for (std.meta.fields(Window)) |field| {
         size_per_item += @sizeOf(field.type);
         // If every element is somehow really poorly aligned this is what we
         // would see. In reality we have guarantees about how adjacent fields
@@ -255,20 +255,20 @@ test "calcMultiArrayListPageNumElems" {
     const page_size = 4096;
     const num_elems = calcMultiArrayListPageNumElems(std.math.log2(page_size));
 
-    const capacity_bytes = std.MultiArrayList(Renderable).capacityInBytes(num_elems);
+    const capacity_bytes = std.MultiArrayList(Window).capacityInBytes(num_elems);
     try std.testing.expect(capacity_bytes <= page_size);
     try std.testing.expect(capacity_bytes > page_size * 9 / 10);
 }
 
-// Ties wayland surfaces that are ready to their renderable state
-pub const Renderables = struct {
+// Ties wayland surfaces that are ready to their window state
+pub const Windows = struct {
     expansion_alloc: sphtud.util.ExpansionAlloc,
-    storage: std.MultiArrayList(Renderable),
+    storage: std.MultiArrayList(Window),
 
-    pub fn init(alloc: *sphtud.alloc.Sphalloc) !Renderables {
+    pub fn init(alloc: *sphtud.alloc.Sphalloc) !Windows {
         const expansion_alloc = alloc.expansion();
 
-        var storage = std.MultiArrayList(Renderable){};
+        var storage = std.MultiArrayList(Window){};
         try storage.setCapacity(expansion_alloc.alloc, calcMultiArrayListPageNumElems(expansion_alloc.info.min_expansion_size_log2));
 
         return .{
@@ -277,19 +277,19 @@ pub const Renderables = struct {
         };
     }
 
-    pub fn swapBuffer(self: *Renderables, handle: Renderables.Handle, new_buffer: rendering.RenderBuffer, new_buffer_id: wayland.Connection.WlBufferId) void {
+    pub fn swapBuffer(self: *Windows, handle: Windows.Handle, new_buffer: rendering.RenderBuffer, new_buffer_id: wayland.Connection.WlBufferId) void {
         const slice = self.storage.slice();
         slice.items(.source_info)[handle.inner].buffer_id = new_buffer_id;
         slice.items(.buffer)[handle.inner] = new_buffer;
     }
 
-    pub fn addOne(self: *Renderables) !Handle {
+    pub fn addOne(self: *Windows) !Handle {
         return .{ .inner = try self.storage.addOne(self.expansion_alloc.alloc) };
     }
 
     const Iter = struct {
         idx: usize,
-        storage: std.MultiArrayList(Renderable).Slice,
+        storage: std.MultiArrayList(Window).Slice,
 
         pub fn next(self: *Iter) bool {
             if (self.idx == 0) {
@@ -299,11 +299,11 @@ pub const Renderables = struct {
             return true;
         }
 
-        pub fn item(self: Iter, comptime field: std.MultiArrayList(Renderable).Field) *@FieldType(Renderable, @tagName(field)) {
+        pub fn item(self: Iter, comptime field: std.MultiArrayList(Window).Field) *@FieldType(Window, @tagName(field)) {
             self.storage.items(field)[self.idx];
         }
 
-        pub fn get(self: Iter) Renderable {
+        pub fn get(self: Iter) Window {
             return self.storage.get(self.idx);
         }
 
@@ -312,22 +312,22 @@ pub const Renderables = struct {
         }
     };
 
-    pub fn iter(self: *Renderables) Iter {
+    pub fn iter(self: *Windows) Iter {
         return .{
             .idx = self.storage.len,
             .storage = self.storage.slice(),
         };
     }
 
-    pub fn set(self: *Renderables, handle: Handle, renderable: Renderable) void {
-        self.storage.set(handle.inner, renderable);
+    pub fn set(self: *Windows, handle: Handle, window: Window) void {
+        self.storage.set(handle.inner, window);
     }
 
-    pub fn count(self: Renderables) usize {
+    pub fn count(self: Windows) usize {
         return self.storage.len;
     }
 
-    pub fn orderedRemove(self: *Renderables, handle: Handle) void {
+    pub fn orderedRemove(self: *Windows, handle: Handle) void {
         self.storage.orderedRemove(handle.inner);
     }
 
@@ -345,11 +345,11 @@ pub const Renderables = struct {
         };
     }
 
-    pub fn items(self: *Renderables, comptime field: std.MultiArrayList(Renderable).Field) Items(@FieldType(Renderable, @tagName(field))) {
+    pub fn items(self: *Windows, comptime field: std.MultiArrayList(Window).Field) Items(@FieldType(Window, @tagName(field))) {
         return .{ .inner = self.storage.items(field) };
     }
 
-    pub fn get(self: *Renderables, handle: Handle) Renderable {
+    pub fn get(self: *Windows, handle: Handle) Window {
         return self.storage.get(handle.inner);
     }
 
@@ -365,10 +365,10 @@ pub const Renderables = struct {
         }
     };
 
-    pub fn moveToEnd(self: *Renderables, handle: Handle) void {
+    pub fn moveToEnd(self: *Windows, handle: Handle) void {
         const multi_slice = self.storage.slice().subslice(handle.inner, self.storage.len - handle.inner);
-        inline for (std.meta.fields(Renderable)) |field| {
-            const field_tag = comptime std.meta.stringToEnum(std.MultiArrayList(Renderable).Field, field.name) orelse unreachable;
+        inline for (std.meta.fields(Window)) |field| {
+            const field_tag = comptime std.meta.stringToEnum(std.MultiArrayList(Window).Field, field.name) orelse unreachable;
             const slice = multi_slice.items(field_tag);
             std.mem.rotate(field.type, slice, 1);
         }
