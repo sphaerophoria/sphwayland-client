@@ -52,14 +52,17 @@ pub const WindowBorder = struct {
     surface_width: u31,
     surface_height: u31,
 
-    pub const Location = enum {
+    pub const Location = union(enum) {
         titlebar,
-        surface,
         close,
         right_border,
         left_border,
         top_border,
         bottom_border,
+        surface: struct {
+            x: i32,
+            y: i32,
+        },
     };
 
     pub fn fromRenderable(window: CompositorState.Window) WindowBorder {
@@ -99,7 +102,10 @@ pub const WindowBorder = struct {
 
         const surface_quad = self.surface();
         if (surface_quad.contains(x, y)) {
-            return .surface;
+            return .{ .surface = .{
+                .x = x - surface_quad.left,
+                .y = y - surface_quad.top,
+            } };
         }
 
         return null;

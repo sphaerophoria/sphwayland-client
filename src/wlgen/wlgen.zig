@@ -102,14 +102,17 @@ const Interface = struct {
         name: []const u8 = &.{},
         description: []const u8 = &.{},
         args: []Arg = &.{},
+        min_version: u32,
 
         const Builder = struct {
             name: []const u8 = &.{},
             description: std.ArrayListUnmanaged(u8) = .{},
             args: std.ArrayListUnmanaged(Arg) = .{},
+            min_version: u32 = 0,
 
             fn init(alloc: Allocator, attrs: *XmlParser.AttributeIt) !@This() {
                 var name: ?[]const u8 = null;
+                var min_version: u32 = 0;
                 errdefer if (name) |n| alloc.free(n);
 
                 while (try attrs.next()) |attr| {
@@ -117,12 +120,17 @@ const Interface = struct {
                     const key = try attr.key.makeContiguousBuf(&key_buf);
                     if (std.mem.eql(u8, key, "name")) {
                         name = try attr.val.makeContiguousAlloc(alloc);
-                        break;
+                    } else if (std.mem.eql(u8, key, "since")) {
+                        const min_version_s = try attr.val.makeContiguousAlloc(alloc);
+                        defer alloc.free(min_version_s);
+
+                        min_version = try std.fmt.parseInt(u32, min_version_s, 0);
                     }
                 }
 
                 return .{
                     .name = name orelse return error.NoReqName,
+                    .min_version = min_version,
                 };
             }
 
@@ -142,6 +150,7 @@ const Interface = struct {
                     .name = self.name,
                     .description = try self.description.toOwnedSlice(alloc),
                     .args = try self.args.toOwnedSlice(alloc),
+                    .min_version = self.min_version,
                 };
             }
         };
@@ -566,9 +575,10 @@ const ZigBindingsWriter = struct {
         try self.writer.print(
             \\    pub const {f}Params = struct {{
             \\        pub const op = {d};
+            \\        pub const min_version = {d};
             \\
         ,
-            .{ snakeToPascal(req.name), i },
+            .{ snakeToPascal(req.name), i, req.min_version },
         );
 
         for (req.args) |arg| {
