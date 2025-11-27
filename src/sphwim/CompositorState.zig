@@ -75,6 +75,7 @@ pub fn pushRenderable(
     surface: wayland.Connection.WlSurfaceId,
     buffer: rendering.RenderBuffer,
     buffer_id: wayland.Connection.WlBufferId,
+    window_id: wayland.Connection.XdgToplevelId,
 ) !Renderables.Handle {
     const handle = try self.renderables.addOne();
 
@@ -83,6 +84,7 @@ pub fn pushRenderable(
             .connection = connection,
             .surface = surface,
             .buffer_id = buffer_id,
+            .window = window_id,
         },
         .position = .{
             .cx = @intCast(self.compositor_res.width / 2),
@@ -130,16 +132,9 @@ fn findClickedWindow(self: *CompositorState) !?WindowFgResult {
         const cursor_x: i32 = @intFromFloat(self.cursor_pos.x);
         const cursor_y: i32 = @intFromFloat(self.cursor_pos.y);
 
-        if (window_border.titleQuad().contains(cursor_x, cursor_y)) {
+        if (window_border.contains(cursor_x, cursor_y)) |location| {
             return .{
-                .location = .titlebar,
-                .handle = it.handle(),
-            };
-        }
-
-        if (window_border.windowTrim().contains(cursor_x, cursor_y)) {
-            return .{
-                .location = .surface,
+                .location = location,
                 .handle = it.handle(),
             };
         }
@@ -159,6 +154,10 @@ pub fn notifyMouse1Down(self: *CompositorState) !void {
                 },
             };
         },
+        .close => {
+            const source_info = self.renderables.items(.source_info).get(res.handle);
+            try source_info.connection.closeWindow(source_info.window);
+        },
         .surface => {},
     }
 
@@ -168,6 +167,7 @@ pub fn notifyMouse1Down(self: *CompositorState) !void {
 pub const SourceInfo = struct {
     connection: *wayland.Connection,
     surface: wayland.Connection.WlSurfaceId,
+    window: wayland.Connection.XdgToplevelId,
     buffer_id: wayland.Connection.WlBufferId,
 };
 

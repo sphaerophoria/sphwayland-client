@@ -125,6 +125,12 @@ pub fn requestFrame(self: *Connection, surface_id: WlSurfaceId) !void {
     try self.io_writer.flush();
 }
 
+pub fn closeWindow(self: *Connection, toplevel_id: XdgToplevelId) !void {
+    var toplevel_interface = Bindings.XdgToplevel{ .id = toplevel_id.inner };
+    try toplevel_interface.close(self.io_writer, .{});
+    try self.io_writer.flush();
+}
+
 pub fn updateRenderableHandle(self: *Connection, surface: WlSurfaceId, handle: CompositorState.Renderables.Handle) void {
     self.wl_surfaces.getPtr(surface).?.committed_buffer_handle = handle;
 }
@@ -464,6 +470,7 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
 
                 const xdg_surface_id = XdgSurfaceId{ .inner = object_id };
                 const surface = try self.getXdgSurface(xdg_surface_id, .interface, diagnostics);
+                surface.toplevel_id = toplevel_id;
 
                 try self.emitXdgSurfaceConfigure(xdg_surface_id, surface);
             },
@@ -532,12 +539,14 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
                             next_buf.render_buffer,
                             next_buf.buf_id,
                         );
-                    } else {
+                    } else blk: {
+                        const toplevel_id = surface.toplevel_id orelse break :blk;
                         surface.committed_buffer_handle = try self.compositor_state.pushRenderable(
                             self,
                             wl_surface_id,
                             next_buf.render_buffer,
                             next_buf.buf_id,
+                            toplevel_id,
                         );
                     }
                 }
@@ -922,6 +931,7 @@ const Surface = struct {
 
     callback_id: ?u32 = null,
     outstanding_xdg_configure: ?u32 = null,
+    toplevel_id: ?XdgToplevelId = null,
 
     fn deinit(self: Surface, alloc: std.mem.Allocator, fd_pool: *FdPool, compositor_state: *CompositorState) void {
         if (self.pending_buffer) |buf| {
