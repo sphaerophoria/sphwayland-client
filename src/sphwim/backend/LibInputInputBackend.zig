@@ -60,7 +60,8 @@ pub fn service(self: *LibInputInputBackend, compositor_state: *CompositorState) 
                 const pointer_event = system.libinput_event_get_pointer_event(next_event);
                 const dx = system.libinput_event_pointer_get_dx(pointer_event);
                 const dy = system.libinput_event_pointer_get_dy(pointer_event);
-                try compositor_state.notifyCursorMovement(@floatCast(dx), @floatCast(dy));
+                const time = system.libinput_event_pointer_get_time(pointer_event);
+                try compositor_state.notifyCursorMovement(@floatCast(dx), @floatCast(dy), time);
             },
             system.LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE => {
                 const pointer_event = system.libinput_event_get_pointer_event(next_event);
@@ -75,7 +76,8 @@ pub fn service(self: *LibInputInputBackend, compositor_state: *CompositorState) 
                     compositor_state.compositor_res.height,
                 );
 
-                try compositor_state.notifyCursorPosition(@floatCast(x), @floatCast(y));
+                const time = system.libinput_event_pointer_get_time(pointer_event);
+                try compositor_state.notifyCursorPosition(@floatCast(x), @floatCast(y), time);
             },
             system.LIBINPUT_EVENT_POINTER_BUTTON => {
                 const pointer_event = system.libinput_event_get_pointer_event(next_event);

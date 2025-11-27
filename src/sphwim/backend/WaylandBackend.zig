@@ -41,7 +41,7 @@ pub fn service(self: *WaylandRenderBackend, renderer: *rendering.Renderer, compo
 
     var input_event_it = self.window.inputEvents();
     while (input_event_it.next()) |event| switch (event.*) {
-        .pointer_movement => |pos| try compositor_state.notifyCursorPosition(pos.x, pos.y),
+        .pointer_movement => |pos| try compositor_state.notifyCursorPosition(pos.x, pos.y, pos.time),
         .mouse1_down => try compositor_state.notifyMouse1Down(),
         .mouse1_up => compositor_state.notifyMouse1Up(),
     };

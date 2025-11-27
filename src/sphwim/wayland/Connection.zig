@@ -33,9 +33,12 @@ gbm_context: *const system_gl.GbmContext,
 interface_registry: InterfaceRegistry,
 wl_surfaces: sphtud.util.AutoHashMap(WlSurfaceId, Surface),
 wl_buffers: sphtud.util.AutoHashMap(WlBufferId, *RefCountedRenderBuffer),
+wl_pointers: sphtud.util.AutoHashMap(WlPointerId, Pointer),
 zwp_params: sphtud.util.AutoHashMap(ZwpBufferParamsId, ?BufferParams),
 xdg_surfaces: sphtud.util.AutoHashMap(XdgSurfaceId, WlSurfaceId),
 windows: sphtud.util.AutoHashMap(XdgToplevelId, Window),
+
+serial: u32,
 
 const typical_surfaces = 2;
 const max_surfaces = 100;
@@ -45,6 +48,14 @@ const max_windows = 100;
 
 const typical_zwp_buffers = 2;
 const max_zwp_buffers = 100;
+
+// I would assume most apps will have a single pointer listener, however you
+// can easily imagine how someone might want to register pointer callbacks in
+// multiple areas and create two libwayland handlers instead of dispatching
+// manually. Even in this case you would expect only a handful. 64 is
+// approaching malicious territory
+const typical_pointers = 4;
+const max_pointers = 64;
 
 const typical_buffers = typical_surfaces * 2;
 const max_buffers = max_surfaces * 2;
@@ -84,10 +95,12 @@ pub fn init(
         .gbm_context = gbm_context,
         .interface_registry = try .init(alloc),
         .wl_surfaces = try .init(alloc.arena(), alloc.expansion(), typical_surfaces, max_surfaces),
+        .wl_pointers = try .init(alloc.arena(), alloc.expansion(), typical_pointers, max_pointers),
         .xdg_surfaces = try .init(alloc.arena(), alloc.expansion(), typical_surfaces, max_surfaces),
         .windows = try .init(alloc.arena(), alloc.expansion(), typical_windows, max_windows),
         .wl_buffers = try .init(alloc.arena(), alloc.expansion(), typical_surfaces, max_surfaces),
         .zwp_params = try .init(alloc.arena(), alloc.expansion(), typical_zwp_buffers, max_zwp_buffers),
+        .serial = 0,
     };
 }
 
@@ -133,6 +146,65 @@ pub fn requestResize(self: *Connection, wl_surface_id: WlSurfaceId, width: i32, 
 pub fn closeWindow(self: *Connection, toplevel_id: XdgToplevelId) !void {
     var toplevel_interface = Bindings.XdgToplevel{ .id = toplevel_id.inner };
     try toplevel_interface.close(self.io_writer, .{});
+    try self.io_writer.flush();
+}
+
+pub fn notifyCursorPosition(self: *Connection, surface_id: WlSurfaceId, x: i32, y: i32, time: u32) !void {
+    // AFAICT, in kwin this comes from the Display abstraction using
+    // wl_display_next_serial and wl_display_get_serial
+    //
+    // This gets set to 0 on display creation and monotonically
+    // incremented
+    //
+    // In Kwin it looks like they generate new serials for each event... kinda.
+    // They'll use the same event for a touch down and enter, but due to the
+    // way the events are triggered, they'll send a different ID for enter and
+    // leave
+    //
+    // AFAICT there are no requirements for this to be this way
+    //
+    // I also believe that all pointer events should share the same serial.
+    // They are the same system event after all. wlroots does this
+    //
+    // So lets grab two serials, one for enter, one for leave and re-use them
+    // for each pointer. No big deal if there's no leave event to be sent, we
+    // can just jump by 2 :)
+
+    const leave_serial = self.incSerial();
+    const enter_serial = self.incSerial();
+
+    var pointer_it = self.wl_pointers.iter();
+    while (pointer_it.next()) |item| {
+        var interface = Bindings.WlPointer{ .id = item.key.inner };
+        if (item.val.isInSurface(surface_id)) {
+            try interface.motion(self.io_writer, .{
+                .time = time,
+                .surface_x = wlio.WlFixed.fromi32(x),
+                .surface_y = wlio.WlFixed.fromi32(y),
+            });
+        } else {
+            if (item.val.current_surface) |to_leave| {
+                try interface.leave(self.io_writer, .{
+                    .serial = leave_serial,
+                    .surface = to_leave.inner,
+                });
+            }
+
+            try interface.enter(self.io_writer, .{
+                .serial = enter_serial,
+                .surface = surface_id.inner,
+                .surface_x = wlio.WlFixed.fromi32(x),
+                .surface_y = wlio.WlFixed.fromi32(y),
+            });
+            item.val.current_surface = surface_id;
+        }
+
+        const interface_version = self.interface_registry.get(interface.id).?.version;
+
+        if (interface_version >= Bindings.WlPointer.FrameParams.min_version) {
+            try interface.frame(self.io_writer, .{});
+        }
+    }
     try self.io_writer.flush();
 }
 
@@ -226,6 +298,12 @@ fn logWithTrace(comptime msg: []const u8, args: anytype) void {
         logger.err("{s}", .{buf_w.buffered()});
     }
 }
+
+fn incSerial(self: *Connection) u32 {
+    self.serial +%= 1;
+    return self.serial;
+}
+
 fn pollError(self: *Connection, diagnostics: *HandleMessageDiagnostics) !void {
     var retrying = false;
     while (true) {
@@ -298,6 +376,7 @@ pub const XdgSurfaceId = struct { inner: u32 };
 pub const XdgToplevelId = struct { inner: u32 };
 pub const WlSurfaceId = struct { inner: u32 };
 pub const WlBufferId = struct { inner: u32 };
+pub const WlPointerId = struct { inner: u32 };
 pub const ZwpBufferParamsId = struct { inner: u32 };
 
 const RequestFormatter = struct {
@@ -415,6 +494,13 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
             .bind => |params| {
                 const interface: Bindings.WaylandInterfaceType = @enumFromInt(params.name);
                 try self.interface_registry.put(params.id, interface, params.id_interface_version, diagnostics);
+                if (params.name == @intFromEnum(Bindings.WaylandInterfaceType.wl_seat)) {
+                    const wl_seat_interface = Bindings.WlSeat{ .id = params.id };
+                    try wl_seat_interface.capabilities(self.io_writer, .{
+                        // Advertising this causes crashes in glfw
+                        .capabilities = 1,
+                    });
+                }
             },
         },
         .wl_region => |parsed| switch (parsed) {
@@ -441,6 +527,22 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
                 logUnhandledRequest(object_id, req);
                 return;
             },
+        },
+        .wl_seat => |parsed| switch (parsed) {
+            .get_pointer => |params| {
+                const pointer_id = WlPointerId{ .inner = params.id };
+                try self.wl_pointers.put(pointer_id, .{});
+                try self.interface_registry.put(params.id, .wl_pointer, version, diagnostics);
+            },
+            else => logUnhandledRequest(object_id, req),
+        },
+        .wl_pointer => |parsed| switch (parsed) {
+            .release => {
+                const pointer_id = WlPointerId{ .inner = object_id };
+                _ = self.wl_pointers.remove(pointer_id);
+                self.interface_registry.remove(object_id);
+            },
+            else => logUnhandledRequest(object_id, req),
         },
         .wl_shm_pool => |parsed| switch (parsed) {
             .destroy => {
@@ -1003,6 +1105,15 @@ const Surface = struct {
         if (self.committed_buffer_handle) |handle| {
             compositor_state.removeWindow(handle);
         }
+    }
+};
+
+const Pointer = struct {
+    current_surface: ?WlSurfaceId = null,
+
+    fn isInSurface(self: Pointer, surface: WlSurfaceId) bool {
+        const current_surface = self.current_surface orelse return false;
+        return current_surface.inner == surface.inner;
     }
 };
 

@@ -65,14 +65,15 @@ pub fn requestFrame(self: *CompositorState) !void {
     }
 }
 
-pub fn notifyCursorMovement(self: *CompositorState, dx: f32, dy: f32) !void {
+pub fn notifyCursorMovement(self: *CompositorState, dx: f32, dy: f32, time: u32) !void {
     try self.notifyCursorPosition(
         self.cursor_pos.x + dx,
         self.cursor_pos.y + dy,
+        time,
     );
 }
 
-pub fn notifyCursorPosition(self: *CompositorState, x: f32, y: f32) !void {
+pub fn notifyCursorPosition(self: *CompositorState, x: f32, y: f32, time: u32) !void {
     self.cursor_pos.x = std.math.clamp(x, 0, asf32(self.compositor_res.width));
     self.cursor_pos.y = std.math.clamp(y, 0, asf32(self.compositor_res.height));
 
@@ -110,7 +111,17 @@ pub fn notifyCursorPosition(self: *CompositorState, x: f32, y: f32) !void {
 
             try si.connection.requestResize(si.surface, @intFromFloat(new_width), @intFromFloat(new_height));
         },
-        .none => {},
+        .none => {
+            if (try self.findHoveredWindow()) |hovered| {
+                switch (hovered.location) {
+                    .surface => |pos| {
+                        const source_info = self.windows.items(.source_info).get(hovered.unstable);
+                        try source_info.connection.notifyCursorPosition(source_info.surface, pos.x, pos.y, time);
+                    },
+                    else => {},
+                }
+            }
+        },
     }
 }
 
@@ -204,7 +215,7 @@ fn moveToFront(self: *CompositorState, handle: Windows.UnstableHandle) void {
     self.windows.moveToEnd(handle);
 }
 
-fn findClickedWindow(self: *CompositorState) !?WindowFgResult {
+fn findHoveredWindow(self: *CompositorState) !?WindowFgResult {
     var it = self.windows.iter();
     while (it.next()) {
         const window = it.get();
@@ -225,7 +236,7 @@ fn findClickedWindow(self: *CompositorState) !?WindowFgResult {
 }
 
 pub fn notifyMouse1Down(self: *CompositorState) !void {
-    const res = (try self.findClickedWindow()) orelse return;
+    const res = (try self.findHoveredWindow()) orelse return;
     switch (res.location) {
         .titlebar => {
             self.drag_state = .{

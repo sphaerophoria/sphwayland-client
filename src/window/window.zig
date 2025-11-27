@@ -260,6 +260,7 @@ pub const Window = struct {
     pub const PointerPos = struct {
         x: f32,
         y: f32,
+        time: u32,
     };
 
     pub fn init(arena: std.mem.Allocator, expansion_alloc: sphtud.util.ExpansionAlloc, env: std.process.Environ) !Window {
@@ -543,6 +544,7 @@ pub const Window = struct {
                     const pointer_update = InputEvent{ .pointer_movement = .{
                         .x = params.surface_x.tof32(),
                         .y = params.surface_y.tof32(),
+                        .time = params.time,
                     } };
                     try self.pending_input_events.append(self.alloc, pointer_update);
                 },
