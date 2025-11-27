@@ -22,6 +22,16 @@ const DragState = union(enum) {
         id: Windows.Handle,
         last: CursorPos,
     },
+    resize: struct {
+        id: Windows.Handle,
+        anchor: enum {
+            left,
+            right,
+            bottom,
+            top,
+        },
+        anchor_pos: i32,
+    },
     none,
 };
 
@@ -47,23 +57,48 @@ pub fn requestFrame(self: *CompositorState) !void {
     }
 }
 
-pub fn notifyCursorMovement(self: *CompositorState, dx: f32, dy: f32) void {
-    self.notifyCursorPosition(
+pub fn notifyCursorMovement(self: *CompositorState, dx: f32, dy: f32) !void {
+    try self.notifyCursorPosition(
         self.cursor_pos.x + dx,
         self.cursor_pos.y + dy,
     );
 }
 
-pub fn notifyCursorPosition(self: *CompositorState, x: f32, y: f32) void {
+pub fn notifyCursorPosition(self: *CompositorState, x: f32, y: f32) !void {
     self.cursor_pos.x = std.math.clamp(x, 0, asf32(self.compositor_res.width));
     self.cursor_pos.y = std.math.clamp(y, 0, asf32(self.compositor_res.height));
 
     switch (self.drag_state) {
         .moving_window => |*params| {
             const position = self.windows.items(.position).getPtr(params.id);
-            position.cx += @intFromFloat(self.cursor_pos.x - params.last.x);
-            position.cy += @intFromFloat(self.cursor_pos.y - params.last.y);
+            position.left += @intFromFloat(self.cursor_pos.x - params.last.x);
+            position.top += @intFromFloat(self.cursor_pos.y - params.last.y);
             params.last = self.cursor_pos;
+        },
+        .resize => |*params| {
+            const si = self.windows.items(.source_info).getPtr(params.id);
+            const buffer = self.windows.items(.buffer).getPtr(params.id);
+
+            var new_width: f32 = @floatFromInt(buffer.width);
+            var new_height: f32 = @floatFromInt(buffer.height);
+            switch (params.anchor) {
+                .left => {
+                    new_width = self.cursor_pos.x - @as(f32, @floatFromInt(params.anchor_pos));
+                },
+                .right => {
+                    new_width = @as(f32, @floatFromInt(params.anchor_pos)) - self.cursor_pos.x;
+                },
+                .top => {
+                    new_height = self.cursor_pos.y - @as(f32, @floatFromInt(params.anchor_pos));
+                },
+                .bottom => {
+                    new_height = @as(f32, @floatFromInt(params.anchor_pos)) - self.cursor_pos.y - geometry.WindowBorder.titlebar_height;
+                },
+            }
+            new_width = @max(new_width, 1);
+            new_height = @max(new_height, 1);
+
+            try si.connection.requestResize(si.surface, @intFromFloat(new_width), @intFromFloat(new_height));
         },
         .none => {},
     }
@@ -87,8 +122,8 @@ pub fn pushWindow(
             .window = window_id,
         },
         .position = .{
-            .cx = @intCast(self.compositor_res.width / 2),
-            .cy = @intCast(self.compositor_res.height / 2),
+            .left = @as(i32, self.compositor_res.width / 2) - @divTrunc(buffer.width, 2),
+            .top = @as(i32, self.compositor_res.height / 2) - @divTrunc(buffer.height, 2),
         },
         .buffer = buffer,
     });
@@ -98,7 +133,7 @@ pub fn pushWindow(
 
 pub fn removeWindow(self: *CompositorState, handle: Windows.Handle) void {
     switch (self.drag_state) {
-        .moving_window => |move_state| {
+        inline .moving_window, .resize => |move_state| {
             if (move_state.id.inner == handle.inner) {
                 self.drag_state = .none;
             }
@@ -108,6 +143,35 @@ pub fn removeWindow(self: *CompositorState, handle: Windows.Handle) void {
 
     self.windows.orderedRemove(handle);
     self.healWindowReferences(handle.inner, self.windows.count(), .removal);
+}
+
+pub fn swapWindowBuffer(self: *CompositorState, handle: Windows.Handle, new_buffer: rendering.RenderBuffer, new_buffer_id: wayland.Connection.WlBufferId) void {
+    const source_info = self.windows.items(.source_info).getPtr(handle);
+    const buffer = self.windows.items(.buffer).getPtr(handle);
+    self.pinDragAnchor(handle, new_buffer);
+    source_info.buffer_id = new_buffer_id;
+    buffer.* = new_buffer;
+}
+
+fn pinDragAnchor(self: *CompositorState, handle: Windows.Handle, new_buffer: rendering.RenderBuffer) void {
+    const position = self.windows.items(.position).getPtr(handle);
+
+    const resize_params = switch (self.drag_state) {
+        .resize => |r| r,
+        .none, .moving_window => return,
+    };
+
+    if (resize_params.id.toIdx() != handle.toIdx()) return;
+
+    switch (resize_params.anchor) {
+        .right => {
+            position.left = resize_params.anchor_pos - new_buffer.width;
+        },
+        .bottom => {
+            position.top = resize_params.anchor_pos - new_buffer.height;
+        },
+        .left, .top => {},
+    }
 }
 
 pub fn notifyMouse1Up(self: *CompositorState) void {
@@ -154,6 +218,46 @@ pub fn notifyMouse1Down(self: *CompositorState) !void {
                 },
             };
         },
+        .right_border => {
+            const renderable = self.windows.get(res.handle);
+            self.drag_state = .{
+                .resize = .{
+                    .id = res.handle,
+                    .anchor = .left,
+                    .anchor_pos = renderable.position.left,
+                },
+            };
+        },
+        .left_border => {
+            const renderable = self.windows.get(res.handle);
+            self.drag_state = .{
+                .resize = .{
+                    .id = res.handle,
+                    .anchor = .right,
+                    .anchor_pos = renderable.position.left + renderable.buffer.width,
+                },
+            };
+        },
+        .top_border => {
+            const renderable = self.windows.get(res.handle);
+            self.drag_state = .{
+                .resize = .{
+                    .id = res.handle,
+                    .anchor = .bottom,
+                    .anchor_pos = renderable.position.top + renderable.buffer.height,
+                },
+            };
+        },
+        .bottom_border => {
+            const renderable = self.windows.get(res.handle);
+            self.drag_state = .{
+                .resize = .{
+                    .id = res.handle,
+                    .anchor = .top,
+                    .anchor_pos = renderable.position.top,
+                },
+            };
+        },
         .close => {
             const source_info = self.windows.items(.source_info).get(res.handle);
             try source_info.connection.closeWindow(source_info.window);
@@ -174,8 +278,8 @@ pub const SourceInfo = struct {
 pub const Window = struct {
     source_info: SourceInfo,
     position: struct {
-        cx: i32,
-        cy: i32,
+        left: i32,
+        top: i32,
     },
     buffer: rendering.RenderBuffer,
 };
@@ -222,7 +326,7 @@ fn healWindowReferences(self: *CompositorState, start: usize, end: usize, reason
         const old_idx = oldIndex(start, end, new_idx, reason);
 
         switch (self.drag_state) {
-            inline .moving_window => |*move_state| {
+            inline .moving_window, .resize => |*move_state| {
                 if (move_state.id.inner == old_idx) {
                     move_state.id = .fromIdx(new_idx);
                 }
@@ -275,12 +379,6 @@ pub const Windows = struct {
             .expansion_alloc = expansion_alloc,
             .storage = storage,
         };
-    }
-
-    pub fn swapBuffer(self: *Windows, handle: Windows.Handle, new_buffer: rendering.RenderBuffer, new_buffer_id: wayland.Connection.WlBufferId) void {
-        const slice = self.storage.slice();
-        slice.items(.source_info)[handle.inner].buffer_id = new_buffer_id;
-        slice.items(.buffer)[handle.inner] = new_buffer;
     }
 
     pub fn addOne(self: *Windows) !Handle {

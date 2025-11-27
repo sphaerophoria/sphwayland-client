@@ -39,8 +39,8 @@ pub const RenderBuffer = struct {
 };
 
 pub const Resolution = struct {
-    width: u32,
-    height: u32,
+    width: u31,
+    height: u31,
 };
 
 fn asf32(in: anytype) f32 {
@@ -205,8 +205,8 @@ pub const Renderer = struct {
         const texture = try importTexture(self.frame_gl_alloc, self.egl_ctx, buffer);
 
         const transform = quadTransform(.{
-            .cx = window.position.cx,
-            .cy = window.position.cy,
+            .left = window.position.left,
+            .top = window.position.top,
             .width = @intCast(window.buffer.width),
             .height = @intCast(window.buffer.height),
         }, self.compositor_state.compositor_res);
@@ -254,20 +254,32 @@ pub const Renderer = struct {
     }
 };
 
-fn pxToNorm(px: i32, axis_size: u32) f32 {
-    var clip: f32 = @floatFromInt(px);
-    clip /= @floatFromInt(axis_size);
+fn pxToNorm(px: f32, axis_size: f32) f32 {
+    var clip: f32 = px;
+    clip /= axis_size;
     return clip;
 }
 
-fn pxToClip(px: i32, axis_size: u32) f32 {
-    const center: i32 = @intCast(axis_size / 2);
+fn pxToClip(px: f32, axis_size: f32) f32 {
+    const center: f32 = axis_size / 2.0;
     return pxToNorm(px - center, axis_size) * 2.0;
 }
 
 fn quadTransform(quad: geometry.PixelQuad, compositor_res: Resolution) sphtud.math.Transform {
-    return sphtud.math.Transform.scale(pxToNorm(quad.width, compositor_res.width), -pxToNorm(quad.height, compositor_res.height))
-        .then(.translate(pxToClip(quad.cx, compositor_res.width), -pxToClip(quad.cy, compositor_res.height)));
+    const cx = quad.cx();
+    const cy = quad.cy();
+    const compositor_width: f32 = @floatFromInt(compositor_res.width);
+    const compositor_height: f32 = @floatFromInt(compositor_res.height);
+    return sphtud.math.Transform.scale(
+        pxToNorm(@floatFromInt(quad.width), compositor_width),
+        -pxToNorm(@floatFromInt(quad.height), compositor_height),
+    )
+        .then(
+        .translate(
+            pxToClip(cx, compositor_width),
+            -pxToClip(cy, compositor_height),
+        ),
+    );
 }
 
 fn importTexture(gl_alloc: *sphtud.render.GlAlloc, egl_ctx: *const system_gl.EglContext, buffer: RenderBuffer) !sphtud.render.Texture {
