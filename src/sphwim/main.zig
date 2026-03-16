@@ -157,7 +157,10 @@ pub fn main() !void {
         &gbm_context,
         &egl_context,
     );
-    try loop.register(server.handler());
+
+    defer std.posix.unlink(server.socket_path) catch {};
+
+    try loop.register(server.server.handler());
     try loop.register(memory_dumper.handler());
     const handlers = try render_backend.makeHandlers(root_alloc.arena(), &renderer, &compositor_state);
     for (handlers) |handler| {

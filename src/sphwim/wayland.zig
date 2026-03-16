@@ -62,6 +62,10 @@ const ServerCtx = struct {
     }
 };
 
+const WaylandServer = struct {
+    server: sphtud.event.net.Server(ServerCtx),
+    socket_path: []const u8,
+};
 pub fn makeWaylandServer(
     server_alloc: *sphtud.alloc.Sphalloc,
     scratch: sphtud.alloc.LinearAllocator,
@@ -69,12 +73,12 @@ pub fn makeWaylandServer(
     compositor_state: *CompositorState,
     gbm_context: *const system_gl.GbmContext,
     egl_context: *const system_gl.EglContext,
-) !sphtud.event.net.Server(ServerCtx) {
+) !WaylandServer {
     const xdg_runtime_dir = std.posix.getenv("XDG_RUNTIME_DIR") orelse return error.NoXdgRuntime;
 
     var idx: usize = 0;
 
-    const net_serv = blk: while (true) {
+    const net_serv, const path = blk: while (true) {
         const cp = scratch.checkpoint();
         defer scratch.restore(cp);
 
@@ -93,10 +97,10 @@ pub fn makeWaylandServer(
         };
 
         std.log.info("Serving on {s}", .{path});
-        break :blk ret;
+        break :blk .{ ret, try server_alloc.arena().dupe(u8, path) };
     };
 
-    return sphtud.event.net.server(net_serv, ServerCtx{
+    const server = try sphtud.event.net.server(net_serv, ServerCtx{
         .server_alloc = server_alloc,
         .scratch = scratch,
         .rand = rand,
@@ -104,4 +108,9 @@ pub fn makeWaylandServer(
         .gbm_context = gbm_context,
         .format_table = try FormatTable.init(scratch, egl_context),
     });
+
+    return .{
+        .server = server,
+        .socket_path = path,
+    };
 }
