@@ -33,6 +33,14 @@ const DragState = union(enum) {
         anchor_pos: i32,
     },
     none,
+
+    fn resolveWindowHandle(self: *DragState, params: anytype, windows: *const Windows) ?Windows.UnstableHandle {
+        return windows.toUnstable(params.id) orelse {
+            std.log.err("drag state has invalid window handle, healing", .{});
+            self.* = .none;
+            return null;
+        };
+    }
 };
 
 const CompositorState = @This();
@@ -70,14 +78,16 @@ pub fn notifyCursorPosition(self: *CompositorState, x: f32, y: f32) !void {
 
     switch (self.drag_state) {
         .moving_window => |*params| {
-            const position = self.windows.items(.position).getPtr(params.id);
+            const unstable_id = self.drag_state.resolveWindowHandle(params, &self.windows) orelse return;
+            const position = self.windows.items(.position).getPtr(unstable_id);
             position.left += @intFromFloat(self.cursor_pos.x - params.last.x);
             position.top += @intFromFloat(self.cursor_pos.y - params.last.y);
             params.last = self.cursor_pos;
         },
         .resize => |*params| {
-            const si = self.windows.items(.source_info).getPtr(params.id);
-            const buffer = self.windows.items(.buffer).getPtr(params.id);
+            const unstable_id = self.drag_state.resolveWindowHandle(params, &self.windows) orelse return;
+            const si = self.windows.items(.source_info).getPtr(unstable_id);
+            const buffer = self.windows.items(.buffer).getPtr(unstable_id);
 
             var new_width: f32 = @floatFromInt(buffer.width);
             var new_height: f32 = @floatFromInt(buffer.height);
@@ -112,9 +122,10 @@ pub fn pushWindow(
     buffer_id: wayland.Connection.WlBufferId,
     window_id: wayland.Connection.XdgToplevelId,
 ) !Windows.Handle {
-    const handle = try self.windows.addOne();
+    const handles = try self.windows.addOne();
 
-    self.windows.set(handle, .{
+    self.windows.set(handles.unstable, .{
+        .stable_handle = handles.stable,
         .source_info = .{
             .connection = connection,
             .surface = surface,
@@ -128,7 +139,7 @@ pub fn pushWindow(
         .buffer = buffer,
     });
 
-    return handle;
+    return handles.stable;
 }
 
 pub fn removeWindow(self: *CompositorState, handle: Windows.Handle) void {
@@ -142,18 +153,22 @@ pub fn removeWindow(self: *CompositorState, handle: Windows.Handle) void {
     }
 
     self.windows.orderedRemove(handle);
-    self.healWindowReferences(handle.inner, self.windows.count(), .removal);
 }
 
 pub fn swapWindowBuffer(self: *CompositorState, handle: Windows.Handle, new_buffer: rendering.RenderBuffer, new_buffer_id: wayland.Connection.WlBufferId) void {
-    const source_info = self.windows.items(.source_info).getPtr(handle);
-    const buffer = self.windows.items(.buffer).getPtr(handle);
-    self.pinDragAnchor(handle, new_buffer);
+    const unstable_handle = self.windows.toUnstable(handle) orelse {
+        std.log.err("swapping window buffer on invalid handle", .{});
+        return;
+    };
+    const source_info = self.windows.items(.source_info).getPtr(unstable_handle);
+    const buffer = self.windows.items(.buffer).getPtr(unstable_handle);
+    self.pinDragAnchor(unstable_handle, new_buffer);
+
     source_info.buffer_id = new_buffer_id;
     buffer.* = new_buffer;
 }
 
-fn pinDragAnchor(self: *CompositorState, handle: Windows.Handle, new_buffer: rendering.RenderBuffer) void {
+fn pinDragAnchor(self: *CompositorState, handle: Windows.UnstableHandle, new_buffer: rendering.RenderBuffer) void {
     const position = self.windows.items(.position).getPtr(handle);
 
     const resize_params = switch (self.drag_state) {
@@ -161,7 +176,8 @@ fn pinDragAnchor(self: *CompositorState, handle: Windows.Handle, new_buffer: ren
         .none, .moving_window => return,
     };
 
-    if (resize_params.id.toIdx() != handle.toIdx()) return;
+    const resize_unstable = self.windows.toUnstable(resize_params.id) orelse return;
+    if (resize_unstable.inner != handle.inner) return;
 
     switch (resize_params.anchor) {
         .right => {
@@ -180,12 +196,12 @@ pub fn notifyMouse1Up(self: *CompositorState) void {
 
 const WindowFgResult = struct {
     location: geometry.WindowBorder.Location,
-    handle: Windows.Handle,
+    stable: Windows.Handle,
+    unstable: Windows.UnstableHandle,
 };
 
-fn moveToFront(self: *CompositorState, handle: Windows.Handle) void {
+fn moveToFront(self: *CompositorState, handle: Windows.UnstableHandle) void {
     self.windows.moveToEnd(handle);
-    self.healWindowReferences(handle.inner, self.windows.count(), .{ .rotation = -1 });
 }
 
 fn findClickedWindow(self: *CompositorState) !?WindowFgResult {
@@ -199,7 +215,8 @@ fn findClickedWindow(self: *CompositorState) !?WindowFgResult {
         if (window_border.contains(cursor_x, cursor_y)) |location| {
             return .{
                 .location = location,
-                .handle = it.handle(),
+                .stable = it.handle(),
+                .unstable = it.unstableHandle(),
             };
         }
     }
@@ -213,59 +230,59 @@ pub fn notifyMouse1Down(self: *CompositorState) !void {
         .titlebar => {
             self.drag_state = .{
                 .moving_window = .{
-                    .id = res.handle,
+                    .id = res.stable,
                     .last = self.cursor_pos,
                 },
             };
         },
         .right_border => {
-            const renderable = self.windows.get(res.handle);
+            const renderable = self.windows.getUnstable(res.unstable);
             self.drag_state = .{
                 .resize = .{
-                    .id = res.handle,
+                    .id = res.stable,
                     .anchor = .left,
                     .anchor_pos = renderable.position.left,
                 },
             };
         },
         .left_border => {
-            const renderable = self.windows.get(res.handle);
+            const renderable = self.windows.getUnstable(res.unstable);
             self.drag_state = .{
                 .resize = .{
-                    .id = res.handle,
+                    .id = res.stable,
                     .anchor = .right,
                     .anchor_pos = renderable.position.left + renderable.buffer.width,
                 },
             };
         },
         .top_border => {
-            const renderable = self.windows.get(res.handle);
+            const renderable = self.windows.getUnstable(res.unstable);
             self.drag_state = .{
                 .resize = .{
-                    .id = res.handle,
+                    .id = res.stable,
                     .anchor = .bottom,
                     .anchor_pos = renderable.position.top + renderable.buffer.height,
                 },
             };
         },
         .bottom_border => {
-            const renderable = self.windows.get(res.handle);
+            const renderable = self.windows.getUnstable(res.unstable);
             self.drag_state = .{
                 .resize = .{
-                    .id = res.handle,
+                    .id = res.stable,
                     .anchor = .top,
                     .anchor_pos = renderable.position.top,
                 },
             };
         },
         .close => {
-            const source_info = self.windows.items(.source_info).get(res.handle);
+            const source_info = self.windows.items(.source_info).get(res.unstable);
             try source_info.connection.closeWindow(source_info.window);
         },
         .surface => {},
     }
 
-    self.moveToFront(res.handle);
+    self.moveToFront(res.unstable);
 }
 
 pub const SourceInfo = struct {
@@ -276,6 +293,7 @@ pub const SourceInfo = struct {
 };
 
 pub const Window = struct {
+    stable_handle: Windows.Handle,
     source_info: SourceInfo,
     position: struct {
         left: i32,
@@ -314,28 +332,6 @@ test "oldIndex" {
     try std.testing.expectEqual(6, oldIndex(3, 6, 5, .removal));
 }
 
-fn healWindowReferences(self: *CompositorState, start: usize, end: usize, reason: HealReason) void {
-    const source_infos = self.windows.items(.source_info);
-
-    for (source_infos.inner[start..end], start..) |si, new_idx| {
-        const new_handle = Windows.Handle{ .inner = new_idx };
-        si.connection.updateRenderableHandle(si.surface, new_handle);
-    }
-
-    for (start..end) |new_idx| {
-        const old_idx = oldIndex(start, end, new_idx, reason);
-
-        switch (self.drag_state) {
-            inline .moving_window, .resize => |*move_state| {
-                if (move_state.id.inner == old_idx) {
-                    move_state.id = .fromIdx(new_idx);
-                }
-            },
-            .none => {},
-        }
-    }
-}
-
 fn calcMultiArrayListPageNumElems(page_size_log2: u8) usize {
     var size_per_item: usize = 0;
     var worst_case_pad: usize = 0;
@@ -367,7 +363,11 @@ test "calcMultiArrayListPageNumElems" {
 // Ties wayland surfaces that are ready to their window state
 pub const Windows = struct {
     expansion_alloc: sphtud.util.ExpansionAlloc,
+    id_map: sphtud.util.AutoHashMap(Handle, UnstableHandle),
+    next_id: u64,
     storage: std.MultiArrayList(Window),
+
+    const max_num_windows = 1 << 14;
 
     pub fn init(alloc: *sphtud.alloc.Sphalloc) !Windows {
         const expansion_alloc = alloc.expansion();
@@ -377,12 +377,30 @@ pub const Windows = struct {
 
         return .{
             .expansion_alloc = expansion_alloc,
+            .id_map = try .init(alloc.arena(), expansion_alloc, 100, max_num_windows),
+            .next_id = 1,
             .storage = storage,
         };
     }
 
-    pub fn addOne(self: *Windows) !Handle {
-        return .{ .inner = try self.storage.addOne(self.expansion_alloc.alloc) };
+    pub fn addOne(self: *Windows) !Handles {
+        if (self.storage.len >= max_num_windows) return error.OutOfMemory;
+
+        const unstable_handle = UnstableHandle{ .inner = try self.storage.addOne(self.expansion_alloc.alloc) };
+
+        while (self.id_map.contains(.{ .inner = self.next_id })) {
+            self.next_id +%= 1;
+        }
+
+        const stable_handle = Handle{ .inner = self.next_id };
+        self.next_id +%= 1;
+
+        try self.id_map.put(stable_handle, unstable_handle);
+
+        return .{
+            .stable = stable_handle,
+            .unstable = unstable_handle,
+        };
     }
 
     const Iter = struct {
@@ -406,7 +424,11 @@ pub const Windows = struct {
         }
 
         pub fn handle(self: Iter) Handle {
-            return .fromIdx(self.idx);
+            return self.storage.items(.stable_handle)[self.idx];
+        }
+
+        pub fn unstableHandle(self: Iter) UnstableHandle {
+            return .{ .inner = self.idx };
         }
     };
 
@@ -417,27 +439,42 @@ pub const Windows = struct {
         };
     }
 
-    pub fn set(self: *Windows, handle: Handle, window: Window) void {
+    pub fn set(self: *Windows, handle: UnstableHandle, window: Window) void {
         self.storage.set(handle.inner, window);
     }
+
+    const Handles = struct {
+        stable: Handle,
+        unstable: UnstableHandle,
+    };
 
     pub fn count(self: Windows) usize {
         return self.storage.len;
     }
 
     pub fn orderedRemove(self: *Windows, handle: Handle) void {
-        self.storage.orderedRemove(handle.inner);
+        const unstable_handle = self.toUnstable(handle).?;
+
+        self.storage.orderedRemove(unstable_handle.inner);
+        _ = self.id_map.remove(handle);
+
+        var id_map_it = self.id_map.iter();
+        while (id_map_it.next()) |elem| {
+            if (elem.val.inner >= unstable_handle.inner) {
+                elem.val.inner -= 1;
+            }
+        }
     }
 
     pub fn Items(comptime T: type) type {
         return struct {
             inner: []T,
 
-            fn get(self: @This(), handle: Handle) T {
+            fn get(self: @This(), handle: UnstableHandle) T {
                 return self.inner[handle.inner];
             }
 
-            fn getPtr(self: @This(), handle: Handle) *T {
+            fn getPtr(self: @This(), handle: UnstableHandle) *T {
                 return &self.inner[handle.inner];
             }
         };
@@ -447,7 +484,12 @@ pub const Windows = struct {
         return .{ .inner = self.storage.items(field) };
     }
 
-    pub fn get(self: *Windows, handle: Handle) Window {
+    pub fn get(self: *Windows, handle: Handle) ?Window {
+        const unstable_id = self.id_map.get(handle) orelse return null;
+        return self.getUnstable(unstable_id);
+    }
+
+    pub fn getUnstable(self: *Windows, handle: UnstableHandle) Window {
         return self.storage.get(handle.inner);
     }
 
@@ -463,12 +505,29 @@ pub const Windows = struct {
         }
     };
 
-    pub fn moveToEnd(self: *Windows, handle: Handle) void {
+    const UnstableHandle = struct {
+        inner: usize,
+    };
+
+    pub fn toUnstable(self: *const Windows, handle: Handle) ?UnstableHandle {
+        return self.id_map.get(handle);
+    }
+
+    fn moveToEnd(self: *Windows, handle: UnstableHandle) void {
         const multi_slice = self.storage.slice().subslice(handle.inner, self.storage.len - handle.inner);
         inline for (std.meta.fields(Window)) |field| {
             const field_tag = comptime std.meta.stringToEnum(std.MultiArrayList(Window).Field, field.name) orelse unreachable;
             const slice = multi_slice.items(field_tag);
             std.mem.rotate(field.type, slice, 1);
+        }
+
+        var it = self.id_map.iter();
+        while (it.next()) |elem| {
+            if (elem.val.inner == handle.inner) {
+                elem.val.inner = self.storage.len - 1;
+            } else if (elem.val.inner > handle.inner) {
+                elem.val.inner -= 1;
+            }
         }
     }
 };
