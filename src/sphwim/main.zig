@@ -7,6 +7,7 @@ const CompositorState = @import("CompositorState.zig");
 const system_gl = @import("system_gl.zig");
 const gl = sphtud.render.gl;
 const backend = @import("backend.zig");
+const dbus = @import("dbus.zig");
 
 pub const std_options = std.Options{
     .log_level = .warn,
@@ -160,8 +161,12 @@ pub fn main() !void {
 
     defer std.posix.unlink(server.socket_path) catch {};
 
+    var dbus_server: dbus.DbusService = undefined;
+    try dbus_server.initPinned(scratch.linear(), &compositor_state);
+
     try loop.register(server.server.handler());
     try loop.register(memory_dumper.handler());
+    try loop.register(dbus_server.handler());
     const handlers = try render_backend.makeHandlers(root_alloc.arena(), &renderer, &compositor_state);
     for (handlers) |handler| {
         try loop.register(handler);

@@ -6,6 +6,9 @@
         .sphtud = .{
             .path = "sphtud",
         },
+        .sphdbus = .{
+            .path = "sphdbus",
+        },
     },
     .paths = .{
         "build.zig",

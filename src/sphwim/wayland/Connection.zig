@@ -637,12 +637,14 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
                         );
                     } else blk: {
                         const toplevel_id = surface.toplevel_id orelse break :blk;
+                        const window_data = self.windows.get(toplevel_id) orelse break :blk;
                         surface.committed_buffer_handle = try self.compositor_state.pushWindow(
                             self,
                             wl_surface_id,
                             next_buf.render_buffer.dmabuf,
                             next_buf.buf_id,
                             toplevel_id,
+                            window_data.title,
                         );
                     }
                 }

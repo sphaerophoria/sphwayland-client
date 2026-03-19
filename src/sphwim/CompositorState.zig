@@ -6,6 +6,7 @@ const FdPool = @import("FdPool.zig");
 const builtin = @import("builtin");
 const geometry = @import("geometry.zig");
 
+alloc: *sphtud.alloc.Sphalloc,
 scratch: *sphtud.alloc.BufAllocator,
 compositor_res: rendering.Resolution,
 drag_state: DragState,
@@ -47,6 +48,7 @@ const CompositorState = @This();
 
 pub fn init(alloc: *sphtud.alloc.Sphalloc, scratch: *sphtud.alloc.BufAllocator, current_res: rendering.Resolution) !CompositorState {
     return .{
+        .alloc = alloc,
         .scratch = scratch,
         .compositor_res = current_res,
         .cursor_pos = .{
@@ -131,10 +133,13 @@ pub fn pushWindow(
     buffer: rendering.RenderBuffer,
     buffer_id: wayland.Connection.WlBufferId,
     window_id: wayland.Connection.XdgToplevelId,
+    title: []const u8,
 ) !Windows.Handle {
     const handles = try self.windows.addOne();
 
+    const window_alloc = try self.alloc.makeSubAlloc("window");
     self.windows.set(handles.unstable, .{
+        .alloc = window_alloc,
         .stable_handle = handles.stable,
         .source_info = .{
             .connection = connection,
@@ -147,6 +152,7 @@ pub fn pushWindow(
             .top = @as(i32, self.compositor_res.height / 2) - @divTrunc(buffer.height, 2),
         },
         .buffer = buffer,
+        .title = try window_alloc.general().dupe(u8, title),
     });
 
     return handles.stable;
@@ -161,6 +167,10 @@ pub fn removeWindow(self: *CompositorState, handle: Windows.Handle) void {
         },
         .none => {},
     }
+
+    const unstable_handle = self.windows.toUnstable(handle) orelse return;
+    const alloc = self.windows.items(.alloc).get(unstable_handle);
+    alloc.deinit();
 
     self.windows.orderedRemove(handle);
 }
@@ -303,6 +313,7 @@ pub const SourceInfo = struct {
 };
 
 pub const Window = struct {
+    alloc: *sphtud.alloc.Sphalloc,
     stable_handle: Windows.Handle,
     source_info: SourceInfo,
     position: struct {
@@ -310,6 +321,7 @@ pub const Window = struct {
         top: i32,
     },
     buffer: rendering.RenderBuffer,
+    title: []u8,
 };
 
 const HealReason = union(enum) {
@@ -426,7 +438,7 @@ pub const Windows = struct {
         }
 
         pub fn item(self: Iter, comptime field: std.MultiArrayList(Window).Field) *@FieldType(Window, @tagName(field)) {
-            self.storage.items(field)[self.idx];
+            return &self.storage.items(field)[self.idx];
         }
 
         pub fn get(self: Iter) Window {
