@@ -1,3 +1,6 @@
 [submodule "sphtud"]
 	path = sphtud
 	url = ../sphtud
+[submodule "sphdbus"]
+	path = sphdbus
+	url = ../sphdbus/

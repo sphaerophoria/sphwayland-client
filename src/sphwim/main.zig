@@ -7,6 +7,7 @@ const CompositorState = @import("CompositorState.zig");
 const system_gl = @import("system_gl.zig");
 const gl = sphtud.render.gl;
 const backend = @import("backend.zig");
+const DbusService = @import("DbusService.zig");
 
 pub const std_options = std.Options{
     .log_level = .warn,
@@ -65,6 +66,7 @@ const Ids = struct {
     wayland: wayland.WaylandServer.Ids,
     memory_dumper: usize,
     signal: usize,
+    dbus: usize,
 
     const max_wl_clients = 4096;
 
@@ -76,6 +78,7 @@ const Ids = struct {
             .wayland = .init(&alloc, max_wl_clients),
             .memory_dumper = alloc.allocOne(),
             .signal = alloc.allocOne(),
+            .dbus = alloc.allocOne(),
         };
     }
 };
@@ -176,6 +179,16 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     defer sphtud.io.unlink(server.socket_path) catch {};
 
+    var dbus_server: DbusService = undefined;
+    try dbus_server.initPinned(init.environ, scratch.linear(), &compositor_state);
+
+    try loop.register(.{
+        .id = ids.dbus,
+        .handle = dbus_server.stream,
+        .read = true,
+        .write = false,
+    });
+
     const signal_fd = try sphtud.io.signalfd(&fd_sigmask);
     try loop.register(.{
         .id = ids.signal,
@@ -202,6 +215,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
             },
             ids.signal => {
                 system_running = false;
+            },
+            ids.dbus => {
+                try dbus_server.service();
             },
             else => unreachable,
         }

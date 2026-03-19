@@ -1,5 +1,6 @@
 const std = @import("std");
 const process_include_paths = @import("sphtud").process_include_paths;
+const sphdbus = @import("sphdbus");
 
 pub const BindingsGenerator = struct {
     b: *std.Build,
@@ -40,6 +41,10 @@ const Builder = struct {
             .with_gl = true,
             .gl_extensions = gl_extensions,
         }).module("sphtud");
+    }
+
+    pub fn importSphdbus(self: Builder) *std.Build.Module {
+        return self.b.dependency("sphdbus", .{}).module("sphdbus");
     }
 
     pub fn makeWlio(
@@ -103,6 +108,11 @@ const Builder = struct {
             self.b.path("res/xdg-decoration-unstable-v1.xml"),
             self.b.path("res/linux-dmabuf-v1.xml"),
         });
+    }
+
+    pub fn makeWmDbusService(self: Builder) *std.Build.Module {
+        const sphdbus_dep = self.b.dependency("sphdbus", .{});
+        return sphdbus.genService(self.b, sphdbus_dep, self.b.path("res/wm_dbus_service.xml"));
     }
 
     pub fn makeWlCmsg(self: Builder) *std.Build.Module {
@@ -212,7 +222,7 @@ const Builder = struct {
         return exe;
     }
 
-    pub fn makeWm(self: Builder, wlio: *std.Build.Module, bindings: *std.Build.Module, sphtud: *std.Build.Module, wl_cmsg: *std.Build.Module, sphwindow: *std.Build.Module) !*std.Build.Step.Compile {
+    pub fn makeWm(self: Builder, wlio: *std.Build.Module, bindings: *std.Build.Module, sphtud: *std.Build.Module, wl_cmsg: *std.Build.Module, sphwindow: *std.Build.Module, sphdbus_mod: *std.Build.Module, dbus_service: *std.Build.Module) !*std.Build.Step.Compile {
         const gl_bindings_translate_c = try self.translateCFixed("src/sphwim/gl_system_bindings.h");
         const gl_bindings = gl_bindings_translate_c.createModule();
 
@@ -235,6 +245,8 @@ const Builder = struct {
         exe.root_module.addImport("gl_system_bindings", gl_bindings);
         exe.root_module.addImport("input", input_bindings);
         exe.root_module.addImport("sphwindow", sphwindow);
+        exe.root_module.addImport("sphdbus", sphdbus_mod);
+        exe.root_module.addImport("dbus_service", dbus_service);
 
         exe.root_module.linkSystemLibrary("gbm", .{});
         exe.root_module.linkSystemLibrary("EGL", .{});
@@ -278,6 +290,7 @@ pub fn build(b: *std.Build) !void {
     };
 
     const sphtud = builder.importSphtud();
+    const sphdbus_mod = builder.importSphdbus();
     const wl_cmsg = builder.makeWlCmsg();
     const wlio_mod = builder.makeWlio(wl_cmsg, sphtud);
     const wlgen = builder.makeWlgen(sphtud);
@@ -289,7 +302,8 @@ pub fn build(b: *std.Build) !void {
     const example = try builder.makeWindowExample(sphwindow);
 
     const server_bindings = builder.makeServerBindings(wlgen, wlio_mod);
-    const wm = try builder.makeWm(wlio_mod, server_bindings, sphtud, wl_cmsg, sphwindow);
+    const wm_dbus_service = builder.makeWmDbusService();
+    const wm = try builder.makeWm(wlio_mod, server_bindings, sphtud, wl_cmsg, sphwindow, sphdbus_mod, wm_dbus_service);
 
     const wm_test = b.addTest(.{
         .name = "sphwim_test",
