@@ -138,13 +138,10 @@ pub const DbusService = struct {
                                         },
                                         .get_property => return error.InvalidCall,
                                         .set_property => return error.InvalidCall,
-
                                     }
                                 },
-
                             }
                         },
-
                     }
                 },
             }

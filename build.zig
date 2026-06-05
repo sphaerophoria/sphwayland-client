@@ -44,7 +44,7 @@ const Builder = struct {
     }
 
     pub fn importSphdbus(self: Builder) *std.Build.Module {
-        return self.b.dependency("sphdbus", .{ }).module("sphdbus");
+        return self.b.dependency("sphdbus", .{}).module("sphdbus");
     }
 
     pub fn makeWlio(
