@@ -1,0 +1,8 @@
+<?xml version="1.0" ?>
+<node xmlns:tp="http://telepathy.freedesktop.org/wiki/DbusSpec#extensions-v0">
+  <interface name="dev.sphaerophoria.sphwim">
+    <method name="GetWindowList" >
+      <arg direction="out" type="a{ts}" name="value" />
+    </method>
+  </interface>
+</node>
