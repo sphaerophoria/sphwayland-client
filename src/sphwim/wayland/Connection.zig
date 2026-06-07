@@ -454,6 +454,17 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
             .destroy => {
                 self.interface_registry.remove(object_id);
             },
+            .create_buffer => |params| {
+                try self.interface_registry.put(params.id, .wl_buffer, version, diagnostics);
+
+                const wl_buffer_id = WlBufferId{ .inner = params.id };
+                {
+                    const buf = try RefCountedRenderBuffer.initShm(self.alloc.general(), wl_buffer_id);
+                    errdefer buf.unref(self.alloc.general(), self.fd_pool);
+
+                    try self.wl_buffers.put(wl_buffer_id, buf);
+                }
+            },
             else => logUnhandledRequest(object_id, req),
         },
         .xdg_wm_base => |parsed| switch (parsed) {
@@ -559,7 +570,7 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
                     if (surface.committed_buffer_handle) |h| {
                         self.compositor_state.swapWindowBuffer(
                             h,
-                            next_buf.render_buffer,
+                            next_buf.render_buffer.dmabuf,
                             next_buf.buf_id,
                         );
                     } else blk: {
@@ -567,7 +578,7 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
                         surface.committed_buffer_handle = try self.compositor_state.pushWindow(
                             self,
                             wl_surface_id,
-                            next_buf.render_buffer,
+                            next_buf.render_buffer.dmabuf,
                             next_buf.buf_id,
                             toplevel_id,
                         );
@@ -638,7 +649,7 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
                 const wl_buffer_id = WlBufferId{ .inner = params.buffer_id };
 
                 {
-                    const buf = try RefCountedRenderBuffer.init(self.alloc.general(), wl_buffer_id, buf_params, params.width, params.height, params.format, params.flags);
+                    const buf = try RefCountedRenderBuffer.initDmaBuf(self.alloc.general(), wl_buffer_id, buf_params, params.width, params.height, params.format, params.flags);
                     errdefer buf.unref(self.alloc.general(), self.fd_pool);
 
                     try self.wl_buffers.put(wl_buffer_id, buf);
@@ -897,24 +908,41 @@ const Buffer = struct {
 // Managed with Connection.alloc.general()
 const RefCountedRenderBuffer = struct {
     ref_count: usize,
-    render_buffer: rendering.RenderBuffer,
+    render_buffer: Inner,
     buf_id: WlBufferId,
 
-    fn init(alloc: std.mem.Allocator, wl_buffer: WlBufferId, params: BufferParams, width: i32, height: i32, format: u32, flags: u32) !*RefCountedRenderBuffer {
+    const Inner = union(enum) {
+        dmabuf: rendering.RenderBuffer,
+        shm: void,
+    };
+
+    fn initDmaBuf(alloc: std.mem.Allocator, wl_buffer: WlBufferId, params: BufferParams, width: i32, height: i32, format: u32, flags: u32) !*RefCountedRenderBuffer {
         _ = flags;
 
         const ret = try alloc.create(RefCountedRenderBuffer);
         ret.* = .{
             .render_buffer = .{
-                .buf_fd = params.fd,
-                .modifiers = params.modifier,
-                .offset = params.offset,
-                .plane_idx = params.plane_idx,
-                .stride = params.stride,
-                .width = width,
-                .height = height,
-                .format = format,
+                .dmabuf = .{
+                    .buf_fd = params.fd,
+                    .modifiers = params.modifier,
+                    .offset = params.offset,
+                    .plane_idx = params.plane_idx,
+                    .stride = params.stride,
+                    .width = width,
+                    .height = height,
+                    .format = format,
+                },
             },
+            .ref_count = 1,
+            .buf_id = wl_buffer,
+        };
+        return ret;
+    }
+
+    fn initShm(alloc: std.mem.Allocator, wl_buffer: WlBufferId) !*RefCountedRenderBuffer {
+        const ret = try alloc.create(RefCountedRenderBuffer);
+        ret.* = .{
+            .render_buffer = .shm,
             .ref_count = 1,
             .buf_id = wl_buffer,
         };
@@ -930,7 +958,10 @@ const RefCountedRenderBuffer = struct {
         self.ref_count -= 1;
         logger.debug("{*} unrefed, count {d}\n", .{ self, self.ref_count });
         if (self.ref_count == 0) {
-            fd_pool.close(self.render_buffer.buf_fd);
+            switch (self.render_buffer) {
+                .dmabuf => |b| fd_pool.close(b.buf_fd),
+                .shm => unreachable,
+            }
             alloc.destroy(self);
         }
     }
