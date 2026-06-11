@@ -1,8 +1,9 @@
 const std = @import("std");
+const sphtud = @import("sphtud");
 const c = @import("c_bindings");
 
 pub const GbmContext = struct {
-    drm_handle: std.fs.File,
+    drm_handle: std.posix.fd_t,
     device: *c.gbm_device,
     surface: *c.gbm_surface,
 
@@ -43,15 +44,15 @@ pub const GbmContext = struct {
     pub fn init(
         init_width: u32,
         init_height: u32,
-        desired_device: []const u8,
+        desired_device: [:0]const u8,
     ) !GbmContext {
         // Would be nice if user could choose
         const device_path = desired_device;
         std.debug.print("{s}\n", .{device_path});
-        const f = try std.fs.openFileAbsolute(device_path, .{ .mode = .read_write });
-        errdefer f.close();
+        const f = try sphtud.io.open(device_path, .{ .ACCMODE = .RDWR }, 0);
+        errdefer sphtud.io.close(f);
 
-        const device = c.gbm_create_device(f.handle) orelse return error.GbmDeviceInit;
+        const device = c.gbm_create_device(f) orelse return error.GbmDeviceInit;
         errdefer c.gbm_device_destroy(device);
 
         const surface = try makeSurface(device, init_width, init_height);
@@ -83,7 +84,7 @@ pub const GbmContext = struct {
     pub fn deinit(self: *GbmContext) void {
         c.gbm_surface_destroy(self.surface);
         c.gbm_device_destroy(self.device);
-        self.drm_handle.close();
+        sphtud.io.close(self.drm_handle);
     }
 
     fn makeSurface(device: *c.gbm_device, width: u32, height: u32) !*c.gbm_surface {

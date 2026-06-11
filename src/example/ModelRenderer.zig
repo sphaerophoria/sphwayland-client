@@ -313,13 +313,13 @@ const Model = struct {
     fn load(alloc: Allocator, data: []const u8) !Model {
         var line_it = std.mem.splitScalar(u8, data, '\n');
 
-        var verts = std.ArrayList(Vert){};
+        var verts = std.ArrayList(Vert).empty;
         defer verts.deinit(alloc);
 
-        var uvs = std.ArrayList(Uv){};
+        var uvs = std.ArrayList(Uv).empty;
         defer uvs.deinit(alloc);
 
-        var faces = std.ArrayList(Face){};
+        var faces = std.ArrayList(Face).empty;
         defer faces.deinit(alloc);
 
         while (line_it.next()) |line| {

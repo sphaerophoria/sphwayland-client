@@ -7,7 +7,6 @@ const input_logger = std.log.scoped(.input);
 
 udev_ctx: *system.udev,
 input_ctx: *system.libinput,
-compositor_state: *CompositorState,
 
 const LibInputInputBackend = @This();
 
@@ -16,35 +15,24 @@ const libinput_interface = system.libinput_interface{
     .close_restricted = closeFile,
 };
 
-pub fn init(alloc: std.mem.Allocator, compositor_state: *CompositorState) !sphtud.event.Loop.Handler {
+pub fn init(env: std.process.Environ) !LibInputInputBackend {
     const udev_ctx = system.udev_new() orelse return error.UdevInit;
 
     const input_ctx = system.libinput_udev_create_context(&libinput_interface, null, udev_ctx) orelse return error.CreateContext;
 
-    const seat_name = std.posix.getenv("XDG_SEAT") orelse return error.NoSeat;
+    const seat_name = env.getPosix("XDG_SEAT") orelse return error.NoSeat;
     if (system.libinput_udev_assign_seat(input_ctx, seat_name) != 0) {
         return error.AssignSeat;
     }
 
-    const ret = try alloc.create(LibInputInputBackend);
-    ret.* = .{
+    return .{
         .udev_ctx = udev_ctx,
         .input_ctx = input_ctx,
-        .compositor_state = compositor_state,
     };
+}
 
-    return .{
-        .ptr = ret,
-        .fd = system.libinput_get_fd(input_ctx),
-        .desired_events = .{
-            .read = true,
-            .write = false,
-        },
-        .vtable = &.{
-            .poll = poll,
-            .close = close,
-        },
-    };
+pub fn getFd(self: LibInputInputBackend) std.posix.fd_t {
+    return system.libinput_get_fd(self.input_ctx);
 }
 
 fn openFile(path: [*c]const u8, flags: c_int, _: ?*anyopaque) callconv(.c) c_int {
@@ -52,20 +40,10 @@ fn openFile(path: [*c]const u8, flags: c_int, _: ?*anyopaque) callconv(.c) c_int
 }
 
 fn closeFile(fd: c_int, _: ?*anyopaque) callconv(.c) void {
-    std.posix.close(fd);
+    sphtud.io.close(fd);
 }
 
-fn poll(ctx: ?*anyopaque, _: *sphtud.event.Loop, _: sphtud.event.PollReason) sphtud.event.Loop.PollResult {
-    const self: *LibInputInputBackend = @ptrCast(@alignCast(ctx));
-    self.pollError() catch |e| {
-        std.log.err("input handling error, shutting down input loop: {t}", .{e});
-        return .complete;
-    };
-
-    return .in_progress;
-}
-
-fn pollError(self: *LibInputInputBackend) anyerror!void {
+pub fn service(self: *LibInputInputBackend, compositor_state: *CompositorState) !void {
     if (system.libinput_dispatch(self.input_ctx) != 0) {
         return error.InputError;
     }
@@ -82,22 +60,22 @@ fn pollError(self: *LibInputInputBackend) anyerror!void {
                 const pointer_event = system.libinput_event_get_pointer_event(next_event);
                 const dx = system.libinput_event_pointer_get_dx(pointer_event);
                 const dy = system.libinput_event_pointer_get_dy(pointer_event);
-                try self.compositor_state.notifyCursorMovement(@floatCast(dx), @floatCast(dy));
+                try compositor_state.notifyCursorMovement(@floatCast(dx), @floatCast(dy));
             },
             system.LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE => {
                 const pointer_event = system.libinput_event_get_pointer_event(next_event);
 
                 const x = system.libinput_event_pointer_get_absolute_x_transformed(
                     pointer_event,
-                    self.compositor_state.compositor_res.width,
+                    compositor_state.compositor_res.width,
                 );
 
                 const y = system.libinput_event_pointer_get_absolute_y_transformed(
                     pointer_event,
-                    self.compositor_state.compositor_res.height,
+                    compositor_state.compositor_res.height,
                 );
 
-                try self.compositor_state.notifyCursorPosition(@floatCast(x), @floatCast(y));
+                try compositor_state.notifyCursorPosition(@floatCast(x), @floatCast(y));
             },
             system.LIBINPUT_EVENT_POINTER_BUTTON => {
                 const pointer_event = system.libinput_event_get_pointer_event(next_event);
@@ -107,10 +85,10 @@ fn pollError(self: *LibInputInputBackend) anyerror!void {
 
                 switch (buttonWithState(button, state)) {
                     buttonWithState(system.BTN_LEFT, system.LIBINPUT_BUTTON_STATE_PRESSED) => {
-                        try self.compositor_state.notifyMouse1Down();
+                        try compositor_state.notifyMouse1Down();
                     },
                     buttonWithState(system.BTN_LEFT, system.LIBINPUT_BUTTON_STATE_RELEASED) => {
-                        self.compositor_state.notifyMouse1Up();
+                        compositor_state.notifyMouse1Up();
                     },
                     else => {
                         input_logger.debug("unused button event 0x{x} {d}", .{ button, state });
@@ -124,8 +102,7 @@ fn pollError(self: *LibInputInputBackend) anyerror!void {
     }
 }
 
-fn close(ctx: ?*anyopaque) void {
-    const self: *LibInputInputBackend = @ptrCast(@alignCast(ctx));
+pub fn deinit(self: LibInputInputBackend) void {
     _ = system.libinput_unref(self.input_ctx);
     _ = system.udev_unref(self.udev_ctx);
 }

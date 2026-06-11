@@ -4,7 +4,7 @@ const std = @import("std");
 pub const max_buf_size = fd_cmsg.fd_cmsg_space;
 pub const fd_list_start = fd_cmsg.fd_cmsg_data_offs;
 
-pub fn sendMessageWithFdAttachment(stream: std.net.Stream, msg: []const u8, fd: c_int) !void {
+pub fn sendMessageWithFdAttachment(stream: std.posix.fd_t, msg: []const u8, fd: c_int) !void {
     const SCM_RIGHTS = 1;
     var cmsg_buf: [fd_cmsg.fd_cmsg_space]u8 = @splat(0);
     const cmsg_len = fd_cmsg.fd_cmsg_data_offs + @sizeOf(c_int);
@@ -21,7 +21,7 @@ pub fn sendMessageWithFdAttachment(stream: std.net.Stream, msg: []const u8, fd: 
         .len = msg.len,
     }};
 
-    const msghdr = std.posix.msghdr_const{
+    const msghdr = std.os.linux.msghdr_const{
         .name = null,
         .namelen = 0,
         .iov = &iov,
@@ -32,7 +32,7 @@ pub fn sendMessageWithFdAttachment(stream: std.net.Stream, msg: []const u8, fd: 
     };
 
     // FIXME: check result
-    _ = try std.posix.sendmsg(stream.handle, &msghdr, 0);
+    _ = std.os.linux.sendmsg(stream, &msghdr, 0);
 }
 
 pub const CmsgHdr = extern struct {

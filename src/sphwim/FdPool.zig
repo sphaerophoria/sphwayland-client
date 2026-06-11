@@ -16,13 +16,13 @@ pub fn register(self: *FdPool, fd: std.posix.fd_t) !void {
 }
 
 pub fn close(self: *FdPool, fd: std.posix.fd_t) void {
-    std.posix.close(fd);
+    sphtud.io.close(fd);
     _ = self.inner.remove(fd);
 }
 
 pub fn closeAll(self: *FdPool) void {
     var it = self.inner.iter();
     while (it.next()) |item| {
-        std.posix.close(item.key.*);
+        sphtud.io.close(item.key.*);
     }
 }

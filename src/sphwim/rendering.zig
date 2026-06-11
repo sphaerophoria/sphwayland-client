@@ -34,7 +34,7 @@ pub const RenderBuffer = struct {
     }
 
     pub fn deinit(self: RenderBuffer) void {
-        std.posix.close(self.buf_fd);
+        sphtud.io.close(self.buf_fd);
     }
 };
 
@@ -77,7 +77,7 @@ pub const Renderer = struct {
     solid_color_renderer: sphtud.render.xyt_program.SolidColorProgram,
     fullscreen_quad: sphtud.render.xyt_program.RenderSource,
 
-    last_render_time: std.time.Instant,
+    last_render_time: std.Io.Timestamp,
 
     render_in_progress: bool,
     backend_rendering_buf: ?system_gl.GbmContext.Buffer,
@@ -121,7 +121,7 @@ pub const Renderer = struct {
 
         return .{
             .frame_gl_alloc = try gl_alloc.makeSubAlloc(alloc),
-            .last_render_time = try std.time.Instant.now(),
+            .last_render_time = try sphtud.io.clock_gettime(.BOOTTIME),
             .compositor_state = compositor_state,
             .egl_ctx = egl_ctx,
             .gbm_ctx = gbm_ctx,
@@ -139,10 +139,10 @@ pub const Renderer = struct {
     }
 
     pub fn render(self: *Renderer) !?system_gl.GbmContext.Buffer {
-        const now = try std.time.Instant.now();
+        const now = try sphtud.io.clock_gettime(.BOOTTIME);
         defer self.last_render_time = now;
 
-        const delta_ns = now.since(self.last_render_time);
+        const delta_ns = self.last_render_time.durationTo(now).toNanoseconds();
         const delta = @as(f32, @floatFromInt(delta_ns)) / std.time.ns_per_s;
 
         const background_red = @abs(self.background_animation_state - 1.0);
@@ -195,7 +195,7 @@ pub const Renderer = struct {
         errdefer self.gbm_ctx.unlock(front_buf);
 
         try self.compositor_state.requestFrame();
-        logger.debug("rendered after {d}ms", .{now.since(self.last_render_time) / std.time.ns_per_ms});
+        logger.debug("rendered after {d}ms", .{self.last_render_time.durationTo(now).toMilliseconds()});
 
         return front_buf;
     }

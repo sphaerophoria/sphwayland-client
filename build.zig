@@ -1,5 +1,5 @@
 const std = @import("std");
-const process_include_paths = @import("build/process_include_paths.zig");
+const process_include_paths = @import("sphtud").process_include_paths;
 
 pub const BindingsGenerator = struct {
     b: *std.Build,
@@ -58,7 +58,7 @@ const Builder = struct {
         return ret;
     }
 
-    pub fn makeWlgen(self: Builder) *std.Build.Step.Compile {
+    pub fn makeWlgen(self: Builder, sphtud: *std.Build.Module) *std.Build.Step.Compile {
         const wlgen = self.b.addExecutable(.{
             .name = "wlgen",
             .root_module = self.b.createModule(.{
@@ -67,6 +67,7 @@ const Builder = struct {
                 .optimize = self.optimize,
             }),
         });
+        wlgen.root_module.addImport("sphtud", sphtud);
         return wlgen;
     }
 
@@ -115,7 +116,7 @@ const Builder = struct {
         exe.root_module.addCSourceFile(.{
             .file = self.b.path("build/gen_zig_cmsg.c"),
         });
-        exe.linkLibC();
+        exe.root_module.link_libc = true;
 
         const run = self.b.addRunArtifact(exe);
         const zig_source = run.addOutputFileArg("fd_cmsg.zig");
@@ -164,7 +165,7 @@ const Builder = struct {
         return sphwindow;
     }
 
-    pub fn makeWlWaiter(self: Builder, wlio: *std.Build.Module, bindings: *std.Build.Module, wlclient: *std.Build.Module) !*std.Build.Step.Compile {
+    pub fn makeWlWaiter(self: Builder, wlio: *std.Build.Module, bindings: *std.Build.Module, wlclient: *std.Build.Module, sphtud: *std.Build.Module) !*std.Build.Step.Compile {
         const exe = self.b.addExecutable(.{ .name = "wait_for_wl", .root_module = self.b.createModule(.{
             .root_source_file = self.b.path("src/wl_waiter.zig"),
             .target = self.target,
@@ -173,6 +174,7 @@ const Builder = struct {
         exe.root_module.addIncludePath(self.b.path("src"));
         exe.root_module.addImport("wl_bindings", bindings);
         exe.root_module.addImport("wlclient", wlclient);
+        exe.root_module.addImport("sphtud", sphtud);
         return exe;
     }
 
@@ -195,14 +197,14 @@ const Builder = struct {
             }),
         });
 
-        exe.linkSystemLibrary("GL");
+        exe.root_module.linkSystemLibrary("GL", .{});
         exe.root_module.addImport("gl", gl_bindings);
         exe.root_module.addImport("stbi", stbi_mod);
-        exe.addIncludePath(self.b.path("src/example"));
-        exe.addCSourceFile(.{
+        exe.root_module.addIncludePath(self.b.path("src/example"));
+        exe.root_module.addCSourceFile(.{
             .file = self.b.path("src/example/stb_image.c"),
         });
-        exe.linkLibC();
+        exe.root_module.link_libc = true;
 
         exe.root_module.addImport("sphwindow", sphwindow);
 
@@ -233,17 +235,17 @@ const Builder = struct {
         exe.root_module.addImport("input", input_bindings);
         exe.root_module.addImport("sphwindow", sphwindow);
 
-        exe.linkSystemLibrary("gbm");
-        exe.linkSystemLibrary("EGL");
-        exe.linkSystemLibrary("input");
-        exe.linkSystemLibrary("libudev");
-        exe.linkSystemLibrary("GL");
+        exe.root_module.linkSystemLibrary("gbm", .{});
+        exe.root_module.linkSystemLibrary("EGL", .{});
+        exe.root_module.linkSystemLibrary("input", .{});
+        exe.root_module.linkSystemLibrary("libudev", .{});
+        exe.root_module.linkSystemLibrary("GL", .{});
 
         for (self.b.search_prefixes.items) |prefix| {
-            exe.addSystemIncludePath(self.b.path(try std.fmt.allocPrint(self.b.allocator, "{s}/include/libdrm", .{prefix})));
+            exe.root_module.addSystemIncludePath(self.b.path(try std.fmt.allocPrint(self.b.allocator, "{s}/include/libdrm", .{prefix})));
         }
-        exe.linkSystemLibrary("drm");
-        exe.linkLibC();
+        exe.root_module.linkSystemLibrary("drm", .{});
+        exe.root_module.link_libc = true;
 
         return exe;
     }
@@ -255,7 +257,7 @@ const Builder = struct {
             .optimize = self.optimize,
         });
 
-        var include_it = try process_include_paths.IncludeIter.init(self.b.allocator);
+        var include_it = try process_include_paths.IncludeIter.init(self.b.allocator, self.b.graph.io);
         while (include_it.next()) |p| {
             window_translate_c_bindings.addSystemIncludePath(std.Build.LazyPath{ .cwd_relative = p });
         }
@@ -277,12 +279,12 @@ pub fn build(b: *std.Build) !void {
     const sphtud = builder.importSphtud();
     const wl_cmsg = builder.makeWlCmsg();
     const wlio_mod = builder.makeWlio(wl_cmsg, sphtud);
-    const wlgen = builder.makeWlgen();
+    const wlgen = builder.makeWlgen(sphtud);
     const client_bindings = builder.makeClientBindings(wlgen, wlio_mod);
     const wlclient = builder.makeWlClient(wlio_mod, wl_cmsg, sphtud);
     const system_gl_bindings = try builder.makeSystemGlBindings();
     const sphwindow = try builder.makeWindow(wlio_mod, client_bindings, wlclient, system_gl_bindings, sphtud);
-    const wait_for_wl = try builder.makeWlWaiter(wlio_mod, client_bindings, wlclient);
+    const wait_for_wl = try builder.makeWlWaiter(wlio_mod, client_bindings, wlclient, sphtud);
     const example = try builder.makeWindowExample(sphwindow);
 
     const server_bindings = builder.makeServerBindings(wlgen, wlio_mod);

@@ -79,22 +79,26 @@ fn bindInterfaces(client: *wlclient.Client(wlb)) !BoundInterfaces {
     };
 }
 
-fn resolveDriHandleFromDevt(alloc: std.mem.Allocator, val_opt: ?u64) ![]const u8 {
+fn resolveDriHandleFromDevt(alloc: std.mem.Allocator, val_opt: ?u64) ![:0]const u8 {
     const default_card = "/dev/dri/card0";
     const val = val_opt orelse {
         std.log.warn("No GPU provided by compositor, using default", .{});
-        return try alloc.dupe(u8, default_card);
+        return try alloc.dupeZ(u8, default_card);
     };
 
-    var dir = try std.fs.openDirAbsolute("/dev/dri", .{ .iterate = true });
-    defer dir.close();
+    const dir = try sphtud.io.open("/dev/dri", .{ .DIRECTORY = true }, 0);
+    defer sphtud.io.close(dir);
 
-    var it = dir.iterate();
+    var iter_buf: [16384]u8 align(8) = undefined;
+    var it = sphtud.io.DirIter.init(dir, &iter_buf);
 
     while (try it.next()) |entry| {
-        const stat = try std.posix.fstatat(dir.fd, entry.name, 0);
-        if (stat.rdev == val) {
-            return try std.fs.path.join(alloc, &.{ "/dev/dri", entry.name });
+        const stat = try sphtud.io.statx(dir, entry.name, 0, .{});
+
+        const rdev = sphtud.io.makeDev(stat.rdev_major, stat.rdev_minor);
+
+        if (rdev == val) {
+            return try std.fs.path.joinZ(alloc, &.{ "/dev/dri", entry.name });
         }
     }
 
@@ -107,7 +111,7 @@ pub const DefaultGlContext = struct {
     gbm_ctx: system.GbmContext,
     compositor_owned_buffers: std.AutoHashMap(u32, system.GbmContext.Buffer),
 
-    pub fn init(alloc: std.mem.Allocator, initial_width: u32, initial_height: u32, device: []const u8) !DefaultGlContext {
+    pub fn init(alloc: std.mem.Allocator, initial_width: u32, initial_height: u32, device: [:0]const u8) !DefaultGlContext {
         var gbm_ctx = try system.GbmContext.init(initial_width, initial_height, device);
         errdefer gbm_ctx.deinit();
 
@@ -148,7 +152,7 @@ pub const DefaultGlContext = struct {
         errdefer self.gbm_ctx.unlock(front_buf);
 
         const buffer = try RenderBuffer.fromGbm(front_buf);
-        defer std.posix.close(buffer.fd);
+        defer sphtud.io.close(buffer.fd);
 
         const wl_buf_id = try window.swapBuffers(buffer);
         try self.compositor_owned_buffers.put(wl_buf_id, front_buf);
@@ -258,8 +262,8 @@ pub const Window = struct {
         y: f32,
     };
 
-    pub fn init(arena: std.mem.Allocator, expansion_alloc: sphtud.util.ExpansionAlloc) !Window {
-        var client = try wlclient.Client(wlb).init(arena, expansion_alloc);
+    pub fn init(arena: std.mem.Allocator, expansion_alloc: sphtud.util.ExpansionAlloc, env: std.process.Environ) !Window {
+        var client = try wlclient.Client(wlb).init(arena, expansion_alloc, env);
         errdefer client.deinit();
 
         const writer = client.writer();
@@ -358,10 +362,10 @@ pub const Window = struct {
     }
 
     pub fn getFd(self: Window) std.posix.fd_t {
-        return self.client.stream.handle;
+        return self.client.stream;
     }
 
-    pub fn getPreferredGpu(self: Window, alloc: std.mem.Allocator) ![]const u8 {
+    pub fn getPreferredGpu(self: Window, alloc: std.mem.Allocator) ![:0]const u8 {
         return resolveDriHandleFromDevt(alloc, self.format_info.preferred_gpu);
     }
 
@@ -576,7 +580,9 @@ pub const Window = struct {
                     const mapped = try std.posix.mmap(
                         null,
                         params.size,
-                        std.posix.system.PROT.READ,
+                        std.posix.system.PROT{
+                            .READ = true,
+                        },
                         .{ .TYPE = .PRIVATE },
                         fd,
                         0,

@@ -12,18 +12,18 @@ pub fn Client(comptime Bindings: type) type {
     return struct {
         interfaces: InterfaceRegistry(Bindings),
 
-        stream: std.net.Stream,
+        stream: std.posix.fd_t,
         stream_reader: *wlio.Reader,
 
-        stream_writer: std.net.Stream.Writer,
+        stream_writer: sphtud.io.Writer,
 
         const Self = @This();
 
-        pub fn init(alloc: Allocator, expansion_alloc: sphtud.util.ExpansionAlloc) !Self {
-            const stream = try openWaylandConnection();
+        pub fn init(alloc: Allocator, expansion_alloc: sphtud.util.ExpansionAlloc, env: std.process.Environ) !Self {
+            const stream = try openWaylandConnection(env);
             const display = Bindings.WlDisplay{ .id = 1 };
             const registry = Bindings.WlRegistry{ .id = 2 };
-            var stream_writer = stream.writer(&.{});
+            var stream_writer = sphtud.io.Writer.init(stream, &.{});
             try display.getRegistry(&stream_writer.interface, .{
                 .registry = registry.id,
             });
@@ -43,7 +43,7 @@ pub fn Client(comptime Bindings: type) type {
 
         pub fn deinit(self: *Self) void {
             self.stream_reader.deinit();
-            self.stream.close();
+            sphtud.io.close(self.stream);
         }
 
         pub fn bind(self: *Self, comptime T: type, global: Bindings.WlRegistry.IncomingMessage.Global) !T {
@@ -168,7 +168,7 @@ pub fn Event(comptime Bindings: type) type {
 
         pub fn deinit(self: @This()) void {
             if (self.fd) |fd| {
-                std.posix.close(fd);
+                sphtud.io.close(fd);
             }
         }
     };
@@ -209,7 +209,7 @@ pub fn EventIt(comptime Bindings: type) type {
             var num_ready: usize = 0;
             while (num_ready == 0) {
                 var pollfd = [1]std.posix.pollfd{.{
-                    .fd = self.client.stream.handle,
+                    .fd = self.client.stream,
                     .events = std.posix.POLL.IN,
                     .revents = 0,
                 }};
@@ -269,7 +269,7 @@ pub fn EventIt(comptime Bindings: type) type {
 
         fn dataInSocket(self: *Self) !bool {
             var pollfd = [1]std.posix.pollfd{.{
-                .fd = self.client.stream.handle,
+                .fd = self.client.stream,
                 .events = std.posix.POLL.IN,
                 .revents = 0,
             }};
@@ -279,13 +279,21 @@ pub fn EventIt(comptime Bindings: type) type {
     };
 }
 
-fn openWaylandConnection() !std.net.Stream {
-    const xdg_runtime_dir = std.posix.getenv("XDG_RUNTIME_DIR") orelse return error.NoXdgRuntime;
-    const wayland_display = std.posix.getenv("WAYLAND_DISPLAY") orelse return error.NoWaylandDisplay;
+fn openWaylandConnection(env: std.process.Environ) !std.posix.fd_t {
+    const xdg_runtime_dir = env.getPosix("XDG_RUNTIME_DIR") orelse return error.NoXdgRuntime;
+    const wayland_display = env.getPosix("WAYLAND_DISPLAY") orelse return error.NoWaylandDisplay;
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     var tmp_alloc = std.heap.FixedBufferAllocator.init(&path_buf);
     const socket_path = try std.fs.path.join(tmp_alloc.allocator(), &.{ xdg_runtime_dir, wayland_display });
 
-    return try std.net.connectUnixSocket(socket_path);
+    const system = sphtud.io.system;
+    const socket = try sphtud.io.socket(system.AF.UNIX, system.SOCK.STREAM, 0);
+
+    try sphtud.io.setBlockMode(socket, .block);
+
+    const unix_addr = try std.Io.net.UnixAddress.init(socket_path);
+    try sphtud.io.connectUnix(socket, unix_addr);
+
+    return socket;
 }

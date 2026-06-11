@@ -11,21 +11,22 @@ const Drm = @This();
 const system_gl = @import("../system_gl.zig");
 
 crtc_id: u32,
-dri_file: std.fs.File,
+dri_file: std.posix.fd_t,
 connector_id: u32,
 preferred_mode: c.drmModeModeInfo,
 crtc_set: bool = false,
 outstanding_buffer: ?system_gl.GbmContext.Buffer,
-preferred_gpu: []const u8,
+preferred_gpu: [:0]const u8,
+callback_state: *PageFlipCallbackState,
 
 pub fn init(alloc: std.mem.Allocator) !Drm {
     const best_gpu = try selectBestGPU(alloc);
     std.log.info("Rendering on GPU {s}", .{best_gpu});
-    const f = try std.fs.openFileAbsolute(best_gpu, .{
-        .mode = .read_write,
-    });
+    const f = try sphtud.io.open(best_gpu, .{
+        .ACCMODE = .RDWR,
+    }, 0);
 
-    const resources: *c.drmModeRes = c.drmModeGetResources(f.handle) orelse return error.GetResourcers;
+    const resources: *c.drmModeRes = c.drmModeGetResources(f) orelse return error.GetResourcers;
     defer c.drmModeFreeResources(resources);
 
     const connector = getFirstConnectedConnector(f, resources) orelse return error.NoConnector;
@@ -34,16 +35,16 @@ pub fn init(alloc: std.mem.Allocator) !Drm {
     // References connector memory
     const preferred_mode = getPreferredMode(connector) orelse return error.NoMode;
 
-    const encoder: *c.drmModeEncoder = c.drmModeGetEncoder(f.handle, connector.encoder_id) orelse return error.NoEncoder;
+    const encoder: *c.drmModeEncoder = c.drmModeGetEncoder(f, connector.encoder_id) orelse return error.NoEncoder;
     defer c.drmModeFreeEncoder(encoder);
 
-    const crtc: *c.drmModeCrtc = c.drmModeGetCrtc(f.handle, encoder.crtc_id) orelse return error.NoEncoder;
+    const crtc: *c.drmModeCrtc = c.drmModeGetCrtc(f, encoder.crtc_id) orelse return error.NoEncoder;
     defer c.drmModeFreeCrtc(crtc);
 
-    try drmErrCheck(c.drmSetMaster(f.handle), error.SetMaster);
+    try drmErrCheck(c.drmSetMaster(f), error.SetMaster);
 
     try drmErrCheck(
-        c.drmModeSetCrtc(f.handle, crtc.crtc_id, 0, 0, 0, 0, 0, 0),
+        c.drmModeSetCrtc(f, crtc.crtc_id, 0, 0, 0, 0, 0, 0),
         error.BlankScreen,
     );
 
@@ -54,111 +55,77 @@ pub fn init(alloc: std.mem.Allocator) !Drm {
         .preferred_mode = preferred_mode.*,
         .outstanding_buffer = null,
         .preferred_gpu = best_gpu,
+        .callback_state = try alloc.create(PageFlipCallbackState),
     };
 }
 
-pub fn deinit(self: *Drm) void {
-    self.dri_file.close();
+pub fn deinit(self: Drm) void {
+    sphtud.io.close(self.dri_file);
 }
 
-const Handler = struct {
+const PageFlipCallbackState = struct {
     parent: *Drm,
     renderer: *rendering.Renderer,
-
-    pub fn close(_: ?*anyopaque) void {}
-
-    fn poll(ctx: ?*anyopaque, _: *sphtud.event.Loop, reason: sphtud.event.PollReason) sphtud.event.Loop.PollResult {
-        const self: *Handler = @ptrCast(@alignCast(ctx));
-
-        self.pollError(reason) catch |e| {
-            std.log.err("Failed to poll: {t}", .{e});
-            return .in_progress;
-        };
-
-        return .in_progress;
-    }
-
-    fn pollError(self: *Handler, reason: sphtud.event.PollReason) !void {
-        if (reason == .init) {
-            // Initial render to kick off vsync loop
-            try self.render();
-            return;
-        }
-
-        var evctx = c.drmEventContext{
-            .version = 2,
-            .page_flip_handler = pageFlipHandler,
-        };
-        _ = c.drmHandleEvent(self.parent.dri_file.handle, &evctx);
-
-        if (self.parent.outstanding_buffer == null) {
-            try self.render();
-        }
-    }
-
-    fn render(self: *Handler) !void {
-        std.debug.assert(self.parent.outstanding_buffer == null);
-
-        const gbm_buffer = (try self.renderer.render()) orelse return;
-        self.parent.outstanding_buffer = gbm_buffer;
-
-        const render_buffer = try rendering.RenderBuffer.fromGbm(gbm_buffer);
-        defer render_buffer.deinit();
-
-        const fb_id = try self.parent.fbFromRenderBuffer(render_buffer);
-
-        // Some systems need a valid framebuffer on first crtc set. We could do an
-        // initial render before initializing DRM, but the rest of the codebase is
-        // simpler if we just lazily initialize on the first render call
-        if (!self.parent.crtc_set) {
-            try drmErrCheck(
-                c.drmModeSetCrtc(
-                    self.parent.dri_file.handle,
-                    self.parent.crtc_id,
-                    fb_id,
-                    0,
-                    0,
-                    &self.parent.connector_id,
-                    1,
-                    &self.parent.preferred_mode,
-                ),
-                error.SetMode,
-            );
-            self.parent.crtc_set = true;
-        }
-
-        try drmErrCheck(
-            c.drmModePageFlip(
-                self.parent.dri_file.handle,
-                self.parent.crtc_id,
-                fb_id,
-                c.DRM_MODE_PAGE_FLIP_EVENT,
-                self,
-            ),
-            error.PageFlip,
-        );
-    }
 };
 
-pub fn makeHandler(self: *Drm, alloc: std.mem.Allocator, renderer: *rendering.Renderer) !sphtud.event.Loop.Handler {
-    const handler_ctx = try alloc.create(Handler);
-    handler_ctx.* = .{
+pub fn service(self: *Drm, renderer: *rendering.Renderer) !void {
+    var evctx = c.drmEventContext{
+        .version = 2,
+        .page_flip_handler = pageFlipHandler,
+    };
+    _ = c.drmHandleEvent(self.dri_file, &evctx);
+
+    if (self.outstanding_buffer == null) {
+        try self.render(renderer);
+    }
+}
+
+pub fn render(self: *Drm, renderer: *rendering.Renderer) !void {
+    std.debug.assert(self.outstanding_buffer == null);
+
+    const gbm_buffer = (try renderer.render()) orelse return;
+    self.outstanding_buffer = gbm_buffer;
+
+    const render_buffer = try rendering.RenderBuffer.fromGbm(gbm_buffer);
+    defer render_buffer.deinit();
+
+    const fb_id = try self.fbFromRenderBuffer(render_buffer);
+
+    // Some systems need a valid framebuffer on first crtc set. We could do an
+    // initial render before initializing DRM, but the rest of the codebase is
+    // simpler if we just lazily initialize on the first render call
+    if (!self.crtc_set) {
+        try drmErrCheck(
+            c.drmModeSetCrtc(
+                self.dri_file,
+                self.crtc_id,
+                fb_id,
+                0,
+                0,
+                &self.connector_id,
+                1,
+                &self.preferred_mode,
+            ),
+            error.SetMode,
+        );
+        self.crtc_set = true;
+    }
+
+    self.callback_state.* = PageFlipCallbackState{
         .parent = self,
         .renderer = renderer,
     };
 
-    return .{
-        .desired_events = .{
-            .read = true,
-            .write = false,
-        },
-        .fd = self.dri_file.handle,
-        .ptr = handler_ctx,
-        .vtable = &.{
-            .poll = Handler.poll,
-            .close = Handler.close,
-        },
-    };
+    try drmErrCheck(
+        c.drmModePageFlip(
+            self.dri_file,
+            self.crtc_id,
+            fb_id,
+            c.DRM_MODE_PAGE_FLIP_EVENT,
+            @constCast(self.callback_state),
+        ),
+        error.PageFlip,
+    );
 }
 
 fn drmErrCheck(rc: c_int, on_err: anyerror) !void {
@@ -177,7 +144,7 @@ fn fbFromRenderBuffer(self: *Drm, buffer: rendering.RenderBuffer) !u32 {
     };
 
     try drmErrCheck(
-        c.drmIoctl(self.dri_file.handle, c.DRM_IOCTL_PRIME_FD_TO_HANDLE, &dri_prime_handle),
+        c.drmIoctl(self.dri_file, c.DRM_IOCTL_PRIME_FD_TO_HANDLE, &dri_prime_handle),
         error.CreateHandle,
     );
 
@@ -191,7 +158,7 @@ fn fbFromRenderBuffer(self: *Drm, buffer: rendering.RenderBuffer) !u32 {
             .handle = dri_prime_handle.handle,
         };
 
-        const ret = c.drmIoctl(self.dri_file.handle, c.DRM_IOCTL_GEM_CLOSE, &gem_close);
+        const ret = c.drmIoctl(self.dri_file, c.DRM_IOCTL_GEM_CLOSE, &gem_close);
         if (ret != 0) {
             std.log.err("Failed to release gem handle: {d}", .{ret});
         }
@@ -212,7 +179,7 @@ fn fbFromRenderBuffer(self: *Drm, buffer: rendering.RenderBuffer) !u32 {
     // FIXME: If this fails once, it will fail every frame, double syscalling
     // is stupid
     const ret = c.drmModeAddFB2WithModifiers(
-        self.dri_file.handle,
+        self.dri_file,
         @intCast(buffer.width),
         @intCast(buffer.height),
         buffer.format,
@@ -230,7 +197,7 @@ fn fbFromRenderBuffer(self: *Drm, buffer: rendering.RenderBuffer) !u32 {
 
     try drmErrCheck(
         c.drmModeAddFB2(
-            self.dri_file.handle,
+            self.dri_file,
             @intCast(buffer.width),
             @intCast(buffer.height),
             buffer.format,
@@ -251,15 +218,15 @@ fn pageFlipHandler(fd: c_int, frame: c_uint, sec: c_uint, usec: c_uint, data: ?*
     _ = frame;
     _ = sec;
     _ = usec;
-    const handler: *Handler = @ptrCast(@alignCast(data));
-    const to_release = handler.parent.outstanding_buffer.?;
-    handler.renderer.releaseBuffer(to_release);
-    handler.parent.outstanding_buffer = null;
+    const self: *PageFlipCallbackState = @ptrCast(@alignCast(data));
+    const to_release = self.parent.outstanding_buffer.?;
+    self.renderer.releaseBuffer(to_release);
+    self.parent.outstanding_buffer = null;
 }
 
-fn getFirstConnectedConnector(f: std.fs.File, resources: *c.drmModeRes) ?*c.drmModeConnector {
+fn getFirstConnectedConnector(f: std.posix.fd_t, resources: *c.drmModeRes) ?*c.drmModeConnector {
     for (resources.connectors[0..@intCast(resources.count_connectors)]) |connector_id| {
-        const connector: *c.drmModeConnector = c.drmModeGetConnector(f.handle, connector_id) orelse continue;
+        const connector: *c.drmModeConnector = c.drmModeGetConnector(f, connector_id) orelse continue;
 
         if (connector.connection == c.DRM_MODE_CONNECTED) {
             return connector;
@@ -285,8 +252,8 @@ const GPUSelectionInfo = struct {
     num_external_displays: usize = 0,
     num_display_ports: usize = 0,
 
-    fn fromFile(path: []const u8, f: std.fs.File) !GPUSelectionInfo {
-        const resources: *c.drmModeRes = c.drmModeGetResources(f.handle) orelse return error.GetResourcers;
+    fn fromFile(path: []const u8, f: std.posix.fd_t) !GPUSelectionInfo {
+        const resources: *c.drmModeRes = c.drmModeGetResources(f) orelse return error.GetResourcers;
         defer c.drmModeFreeResources(resources);
 
         var count_internal_displays: usize = 0;
@@ -294,7 +261,7 @@ const GPUSelectionInfo = struct {
         var count_display_ports: usize = 0;
 
         for (resources.connectors[0..@intCast(resources.count_connectors)]) |connector_id| {
-            const connector: *c.drmModeConnector = c.drmModeGetConnectorCurrent(f.handle, connector_id) orelse {
+            const connector: *c.drmModeConnector = c.drmModeGetConnectorCurrent(f, connector_id) orelse {
                 std.log.warn("Failed to get connector properties for connector {d}", .{connector_id});
                 continue;
             };
@@ -304,7 +271,7 @@ const GPUSelectionInfo = struct {
 
             const is_internal = isInternal(connector.connector_type);
             const is_non_desktop = if (is_internal) false else try isNonDesktop(
-                f.handle,
+                f,
                 connector.props[0..@intCast(connector.count_props)],
                 connector.prop_values[0..@intCast(connector.count_props)],
             );
@@ -359,17 +326,19 @@ const GPUSelectionInfo = struct {
     }
 };
 
-fn selectBestGPU(alloc: std.mem.Allocator) ![]const u8 {
-    var dir = try std.fs.openDirAbsolute("/dev/dri", .{ .iterate = true });
-    defer dir.close();
+fn selectBestGPU(alloc: std.mem.Allocator) ![:0]const u8 {
+    const dir = try sphtud.io.open("/dev/dri", .{ .DIRECTORY = true }, 0);
+    defer sphtud.io.close(dir);
 
     var best = GPUSelectionInfo{};
 
-    var it = dir.iterate();
+    var buf: [4096]u8 align(8) = undefined;
+    var it = sphtud.io.DirIter.init(dir, &buf);
     while (try it.next()) |entry| {
         if (entry.kind != .character_device) continue;
-        const f = try dir.openFile(entry.name, .{ .mode = .read_write });
-        defer f.close();
+
+        const f = try sphtud.io.openat(dir, entry.name, .{ .ACCMODE = .RDWR, .CREAT = false }, 0);
+        defer sphtud.io.close(f);
 
         const entry_info = GPUSelectionInfo.fromFile(entry.name, f) catch |e| {
             std.log.warn("Failed to get GPU info for {s} ({t}), skipping\n", .{ entry.name, e });
@@ -380,5 +349,5 @@ fn selectBestGPU(alloc: std.mem.Allocator) ![]const u8 {
         }
     }
 
-    return try std.fs.path.join(alloc, &.{ "/dev/dri", best.path });
+    return try std.fs.path.joinZ(alloc, &.{ "/dev/dri", best.path });
 }

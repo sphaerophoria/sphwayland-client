@@ -17,20 +17,9 @@ const PeriodicMemoryDumper = struct {
     scratch: *sphtud.alloc.BufAllocator,
     timer: std.posix.fd_t,
 
-    fn init(root: *sphtud.alloc.Sphalloc, scratch: *sphtud.alloc.BufAllocator) !PeriodicMemoryDumper {
-        const fd = try std.posix.timerfd_create(.MONOTONIC, .{ .NONBLOCK = true });
-
-        const timer = std.posix.system.itimerspec{
-            .it_value = .{
-                .sec = 0.0,
-                .nsec = 1.0,
-            },
-            .it_interval = .{
-                .sec = 5.0,
-                .nsec = 0.0,
-            },
-        };
-        try std.posix.timerfd_settime(fd, .{ .ABSTIME = false }, &timer, null);
+    pub fn init(root: *sphtud.alloc.Sphalloc, scratch: *sphtud.alloc.BufAllocator) !PeriodicMemoryDumper {
+        const fd = try sphtud.io.timerfd_create(.BOOTTIME);
+        try sphtud.io.timerfd_settime(fd, .{ .rel = .fromSeconds(1) }, .fromSeconds(5));
 
         return .{
             .root = root,
@@ -39,30 +28,11 @@ const PeriodicMemoryDumper = struct {
         };
     }
 
-    const vtable = sphtud.event.Loop.Handler.VTable{
-        .poll = poll,
-        .close = close,
-    };
-
-    fn handler(self: *PeriodicMemoryDumper) sphtud.event.Loop.Handler {
-        return .{
-            .ptr = self,
-            .fd = self.timer,
-            .vtable = &vtable,
-            .desired_events = .{
-                .read = true,
-                .write = true,
-            },
-        };
+    pub fn deinit(self: *PeriodicMemoryDumper) void {
+        sphtud.io.close(self.timer);
     }
 
-    fn poll(ctx: ?*anyopaque, _: *sphtud.event.Loop, _: sphtud.event.PollReason) sphtud.event.Loop.PollResult {
-        const self: *PeriodicMemoryDumper = @ptrCast(@alignCast(ctx));
-        self.pollError() catch return .complete;
-        return .in_progress;
-    }
-
-    fn pollError(self: *PeriodicMemoryDumper) !void {
+    pub fn service(self: *PeriodicMemoryDumper) !void {
         const cp = self.scratch.checkpoint();
         defer self.scratch.restore(cp);
 
@@ -74,11 +44,6 @@ const PeriodicMemoryDumper = struct {
         for (snapshot) |elem| {
             std.log.info("{s}: {d}", .{ elem.name, elem.memory_used });
         }
-    }
-
-    fn close(ctx: ?*anyopaque) void {
-        const self: *PeriodicMemoryDumper = @ptrCast(@alignCast(ctx));
-        std.posix.close(self.timer);
     }
 };
 
@@ -95,7 +60,27 @@ pub fn initializeGlParams() void {
     gl.glDepthFunc(gl.GL_LESS);
 }
 
-pub fn main() !void {
+const Ids = struct {
+    backend: backend.Ids,
+    wayland: wayland.WaylandServer.Ids,
+    memory_dumper: usize,
+
+    const max_wl_clients = 4096;
+
+    fn init() Ids {
+        var alloc = sphtud.util.IdAlloc.init;
+
+        return .{
+            .backend = .init(&alloc),
+            .wayland = .init(&alloc, max_wl_clients),
+            .memory_dumper = alloc.allocOne(),
+        };
+    }
+};
+
+const ids = Ids.init();
+
+pub fn main(init: std.process.Init.Minimal) !void {
     var tpa: sphtud.alloc.TinyPageAllocator = undefined;
     try tpa.initPinned();
 
@@ -107,7 +92,10 @@ pub fn main() !void {
 
     var system_running: bool = true;
 
-    const render_backend = try backend.initBackend(root_alloc.arena(), root_alloc.expansion(), &system_running);
+    var chain_buf: [100]usize = undefined;
+    var loop = try sphtud.io.Loop.init(&chain_buf);
+
+    var render_backend = try backend.initBackend(root_alloc.arena(), root_alloc.expansion(), init.environ, &system_running, &loop, ids.backend);
     defer render_backend.deinit();
 
     var gbm_context = try system_gl.GbmContext.init(render_backend.initial_res.width, render_backend.initial_res.height, render_backend.preferred_gpu);
@@ -121,11 +109,19 @@ pub fn main() !void {
     initializeGlParams();
 
     var rng_seed: u64 = undefined;
-    try std.posix.getrandom(std.mem.asBytes(&rng_seed));
+    try sphtud.io.getrandom(std.mem.asBytes(&rng_seed));
     var rng = std.Random.DefaultPrng.init(rng_seed);
 
     var compositor_state = try CompositorState.init(&root_alloc, &scratch, render_backend.initial_res);
+
     var memory_dumper = try PeriodicMemoryDumper.init(&root_alloc, &scratch);
+    defer memory_dumper.deinit();
+    try loop.register(.{
+        .id = ids.memory_dumper,
+        .handle = memory_dumper.timer,
+        .read = true,
+        .write = false,
+    });
 
     var gl_alloc = try sphtud.render.GlAlloc.init(&root_alloc);
     defer gl_alloc.deinit();
@@ -144,11 +140,6 @@ pub fn main() !void {
         solid_color_renderer,
     );
 
-    var loop = try sphtud.event.Loop.init(
-        root_alloc.arena(),
-        root_alloc.expansion(),
-    );
-
     var server = try wayland.makeWaylandServer(
         try root_alloc.makeSubAlloc("server"),
         scratch.linear(),
@@ -156,23 +147,34 @@ pub fn main() !void {
         &compositor_state,
         &gbm_context,
         &egl_context,
+        &loop,
+        init.environ,
+        ids.wayland,
     );
 
-    defer std.posix.unlink(server.socket_path) catch {};
+    defer sphtud.io.unlink(server.socket_path) catch {};
 
-    try loop.register(server.server.handler());
-    try loop.register(memory_dumper.handler());
-    const handlers = try render_backend.makeHandlers(root_alloc.arena(), &renderer, &compositor_state);
-    for (handlers) |handler| {
-        try loop.register(handler);
-    }
+    try render_backend.serviceFirst(&renderer, &compositor_state);
 
     while (system_running) {
         scratch.reset();
-        try loop.wait(scratch.linear());
+        const event = try loop.poll(-1) orelse continue;
+
+        switch (event) {
+            ids.backend.total.start...ids.backend.total.end => {
+                try render_backend.service(&renderer, &compositor_state, event, ids.backend);
+            },
+            ids.wayland.total.start...ids.wayland.total.end => {
+                try server.service(event, ids.wayland);
+            },
+            ids.memory_dumper => {
+                try memory_dumper.service();
+            },
+            else => unreachable,
+        }
     }
 }
 
 test {
-    std.testing.refAllDeclsRecursive(@This());
+    std.testing.refAllDecls(@This());
 }

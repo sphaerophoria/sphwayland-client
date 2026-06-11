@@ -21,13 +21,13 @@ pub fn initializeGlParams() void {
     gl.glDepthFunc(gl.GL_LESS);
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var alloc_buf: [1 * 1024 * 1024]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&alloc_buf);
 
     const alloc = fba.allocator();
 
-    var window = try sphwindow.Window.init(alloc, .linear(alloc));
+    var window = try sphwindow.Window.init(alloc, .linear(alloc), init.environ);
     defer window.deinit();
 
     var gl_ctx = blk: {

@@ -22,7 +22,7 @@ format_table: server.FormatTable,
 
 rand: std.Random,
 
-connection: std.net.Server.Connection,
+connection: std.posix.fd_t,
 stream_reader: *Reader,
 io_reader: *std.Io.Reader,
 io_writer: *std.Io.Writer,
@@ -50,29 +50,24 @@ const typical_buffers = typical_surfaces * 2;
 const max_buffers = max_surfaces * 2;
 const display_id = 1;
 
-const vtable = sphtud.event.Loop.Handler.VTable{
-    .poll = poll,
-    .close = close,
-};
-
 pub fn init(
     alloc: *sphtud.alloc.Sphalloc,
     scratch: sphtud.alloc.LinearAllocator,
-    connection: std.net.Server.Connection,
+    connection: std.posix.fd_t,
     rand: std.Random,
     compositor_state: *CompositorState,
     gbm_context: *const system_gl.GbmContext,
     format_table: server.FormatTable,
 ) !Connection {
-    const stream_writer = try alloc.arena().create(std.net.Stream.Writer);
-    stream_writer.* = connection.stream.writer(try alloc.arena().alloc(u8, 4096));
+    const stream_writer = try alloc.arena().create(sphtud.io.Writer);
+    stream_writer.* = .init(connection, try alloc.arena().alloc(u8, 4096));
     const io_writer = &stream_writer.interface;
 
     const fd_pool = try alloc.arena().create(FdPool);
     fd_pool.* = try .init(alloc, 8, 100);
 
     const stream_reader = try alloc.arena().create(Reader);
-    stream_reader.* = try Reader.init(alloc.arena(), connection.stream);
+    stream_reader.* = try Reader.init(alloc.arena(), connection);
     const io_reader = &stream_reader.interface;
 
     return .{
@@ -93,18 +88,6 @@ pub fn init(
         .windows = try .init(alloc.arena(), alloc.expansion(), typical_windows, max_windows),
         .wl_buffers = try .init(alloc.arena(), alloc.expansion(), typical_surfaces, max_surfaces),
         .zwp_params = try .init(alloc.arena(), alloc.expansion(), typical_zwp_buffers, max_zwp_buffers),
-    };
-}
-
-pub fn handler(self: *Connection) sphtud.event.Loop.Handler {
-    return .{
-        .ptr = self,
-        .vtable = &vtable,
-        .fd = self.connection.stream.handle,
-        .desired_events = .{
-            .read = true,
-            .write = true,
-        },
     };
 }
 
@@ -157,8 +140,12 @@ pub fn updateRenderableHandle(self: *Connection, surface: WlSurfaceId, handle: C
     self.wl_surfaces.getPtr(surface).?.committed_buffer_handle = handle;
 }
 
-fn poll(ctx: ?*anyopaque, _: *sphtud.event.Loop, _: sphtud.event.PollReason) sphtud.event.Loop.PollResult {
-    const self: *Connection = @ptrCast(@alignCast(ctx));
+pub const ServiceAction = enum {
+    in_progress,
+    complete,
+};
+
+pub fn service(self: *Connection) ServiceAction {
     var message_buf: [4096]u8 = undefined;
     var diagnostics = HandleMessageDiagnostics{
         .msg_buf = &message_buf,
@@ -230,7 +217,13 @@ fn poll(ctx: ?*anyopaque, _: *sphtud.event.Loop, _: sphtud.event.PollReason) sph
 fn logWithTrace(comptime msg: []const u8, args: anytype) void {
     logger.err(msg, args);
     if (@errorReturnTrace()) |t| {
-        logger.err("{f}", .{t});
+        var buf: [4096]u8 = undefined;
+        var buf_w = std.Io.Writer.fixed(&buf);
+        std.debug.writeErrorReturnTrace(t, .{
+            .mode = .escape_codes,
+            .writer = &buf_w,
+        }) catch {};
+        logger.err("{s}", .{buf_w.buffered()});
     }
 }
 fn pollError(self: *Connection, diagnostics: *HandleMessageDiagnostics) !void {
@@ -275,7 +268,7 @@ fn pollError(self: *Connection, diagnostics: *HandleMessageDiagnostics) !void {
             };
 
             self.fd_pool.register(fd.?) catch |e| {
-                std.posix.close(fd.?);
+                sphtud.io.close(fd.?);
                 return e;
             };
         }
@@ -288,8 +281,7 @@ fn pollError(self: *Connection, diagnostics: *HandleMessageDiagnostics) !void {
     }
 }
 
-fn close(ctx: ?*anyopaque) void {
-    const self: *Connection = @ptrCast(@alignCast(ctx));
+pub fn deinit(self: *Connection) void {
     var surface_it = self.wl_surfaces.iter();
     while (surface_it.next()) |surface| {
         if (surface.val.committed_buffer_handle) |h| {
@@ -298,7 +290,7 @@ fn close(ctx: ?*anyopaque) void {
     }
 
     self.fd_pool.closeAll();
-    self.connection.stream.close();
+    sphtud.io.close(self.connection);
     self.alloc.deinit();
 }
 
@@ -800,7 +792,7 @@ fn sendSurfaceFeedback(self: *Connection, params: anytype, diagnostics: *HandleM
 
         // Ensure ordering :)
         try self.io_writer.flush();
-        wl_cmsg.sendMessageWithFdAttachment(self.connection.stream, format_table_writer.buffered(), self.format_table.fd) catch {
+        wl_cmsg.sendMessageWithFdAttachment(self.connection, format_table_writer.buffered(), self.format_table.fd) catch {
             // All other writes get clobbered to WriteFailed by std.Io.Writer, we can do the same
             return error.WriteFailed;
         };

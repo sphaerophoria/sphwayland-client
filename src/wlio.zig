@@ -13,7 +13,7 @@ pub const WlFixed = packed struct(u32) {
     }
 };
 
-pub fn writeWlMessage(writer: *std.io.Writer, elem: anytype, id: u32) !void {
+pub fn writeWlMessage(writer: *std.Io.Writer, elem: anytype, id: u32) !void {
     var size: usize = @sizeOf(HeaderLE);
     inline for (std.meta.fields(@TypeOf(elem))) |field| {
         switch (field.type) {
@@ -165,12 +165,12 @@ fn roundUp(val: anytype, mul: @TypeOf(val)) @TypeOf(val) {
 }
 
 pub const Reader = struct {
-    socket: std.net.Stream,
+    socket: std.posix.fd_t,
     fd_list: sphtud.util.CircularBuffer(std.posix.fd_t),
     last_res: std.os.linux.E = .SUCCESS,
     interface: std.Io.Reader,
 
-    pub fn init(alloc: std.mem.Allocator, socket: std.net.Stream) !Reader {
+    pub fn init(alloc: std.mem.Allocator, socket: std.posix.fd_t) !Reader {
         return .{
             .socket = socket,
             .fd_list = .{
@@ -192,7 +192,7 @@ pub const Reader = struct {
     pub fn deinit(self: *Reader) void {
         var it = self.fd_list.iter();
         while (it.next()) |fd| {
-            std.posix.close(fd);
+            sphtud.io.close(fd);
         }
     }
 
@@ -219,11 +219,11 @@ pub const Reader = struct {
         };
 
         // We could recvmmsg here, but for now this is good enough
-        const ret = std.os.linux.recvmsg(self.socket.handle, &msg_header, 0);
+        const ret = std.os.linux.recvmsg(self.socket, &msg_header, 0);
 
         if (ret == 0) return error.EndOfStream;
 
-        const linux_err: std.os.linux.E = .init(ret);
+        const linux_err = std.os.linux.errno(ret);
         switch (linux_err) {
             .SUCCESS => {},
             else => {
@@ -242,7 +242,7 @@ pub const Reader = struct {
 
                     self.fd_list.pushNoClobber(fd) catch {
                         std.log.err("Dropped file descriptor", .{});
-                        std.posix.close(fd);
+                        sphtud.io.close(fd);
                         break :blk;
                     };
                 }

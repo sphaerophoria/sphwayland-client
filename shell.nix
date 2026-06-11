@@ -1,4 +1,4 @@
-with import <nixpkgs> {};
+with import <nixpkgs> { };
 pkgs.mkShell {
   nativeBuildInputs = with pkgs; with xorg; [
     zls

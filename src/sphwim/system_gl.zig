@@ -4,7 +4,7 @@ const c = @import("gl_system_bindings");
 const rendering = @import("rendering.zig");
 
 pub const GbmContext = struct {
-    drm_handle: std.fs.File,
+    drm_handle: std.posix.fd_t,
     device: *c.gbm_device,
     surface: *c.gbm_surface,
 
@@ -49,14 +49,14 @@ pub const GbmContext = struct {
     pub fn init(
         init_width: u32,
         init_height: u32,
-        device_path: []const u8,
+        device_path: [:0]const u8,
     ) !GbmContext {
         std.log.debug("Initializing GL context with GPU {s}\n", .{device_path});
 
-        const f = try std.fs.openFileAbsolute(device_path, .{ .mode = .read_write });
-        errdefer f.close();
+        const f = try sphtud.io.open(device_path, .{ .ACCMODE = .RDWR }, 0);
+        errdefer sphtud.io.close(f);
 
-        const device = c.gbm_create_device(f.handle) orelse return error.GbmDeviceInit;
+        const device = c.gbm_create_device(f) orelse return error.GbmDeviceInit;
         errdefer c.gbm_device_destroy(device);
 
         const surface = c.gbm_surface_create(device, init_width, init_height, format, c.GBM_BO_USE_SCANOUT | c.GBM_BO_USE_RENDERING) orelse return error.GbmSurfaceInit;
@@ -83,12 +83,13 @@ pub const GbmContext = struct {
     pub fn deinit(self: *GbmContext) void {
         c.gbm_surface_destroy(self.surface);
         c.gbm_device_destroy(self.device);
-        self.drm_handle.close();
+        sphtud.io.close(self.drm_handle);
     }
 
     pub fn getDevt(self: GbmContext) !u64 {
-        const stat = try std.posix.fstat(self.drm_handle.handle);
-        return stat.rdev;
+        const system = sphtud.io.system;
+        const stat = try sphtud.io.statx(self.drm_handle, "", system.AT.EMPTY_PATH, .{});
+        return sphtud.io.makeDev(stat.rdev_major, stat.rdev_minor);
     }
 };
 

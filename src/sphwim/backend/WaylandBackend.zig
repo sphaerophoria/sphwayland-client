@@ -14,79 +14,24 @@ window: sphwindow.Window,
 system_running: *bool,
 outstanding_buffers: sphtud.util.AutoHashMap(u32, system_gl.GbmContext.Buffer),
 
-pub fn init(alloc: std.mem.Allocator, expansion_alloc: sphtud.util.ExpansionAlloc, system_running: *bool) !backend.Backend {
-    const ctx = try alloc.create(WaylandRenderBackend);
-
-    ctx.* = .{
-        .window = try sphwindow.Window.init(alloc, expansion_alloc),
+pub fn init(alloc: std.mem.Allocator, expansion_alloc: sphtud.util.ExpansionAlloc, env: std.process.Environ, system_running: *bool) !WaylandRenderBackend {
+    return .{
+        .window = try sphwindow.Window.init(alloc, expansion_alloc, env),
         .system_running = system_running,
         // Anything over quadruple buffering would be quite surprising to me
         .outstanding_buffers = try .init(alloc, .linear(alloc), 4, 4),
     };
-
-    return .{
-        .preferred_gpu = try ctx.window.getPreferredGpu(alloc),
-        .initial_res = .{ .width = 1024, .height = 768 },
-        .ctx = ctx,
-        .vtable = &.{
-            .makeHandlers = makeHandlers,
-            .deinit = deinit,
-        },
-    };
 }
 
-fn deinit(ctx: ?*anyopaque) void {
-    const self: *WaylandRenderBackend = @ptrCast(@alignCast(ctx));
+pub fn getFd(self: *const WaylandRenderBackend) std.posix.fd_t {
+    return self.window.getFd();
+}
+
+pub fn deinit(self: *WaylandRenderBackend) void {
     self.window.deinit();
 }
 
-const Handler = struct {
-    parent: *WaylandRenderBackend,
-    renderer: *rendering.Renderer,
-    compositor_state: *CompositorState,
-
-    fn close(_: ?*anyopaque) void {}
-
-    fn poll(ctx: ?*anyopaque, _: *sphtud.event.Loop, _: sphtud.event.PollReason) sphtud.event.Loop.PollResult {
-        const self: *Handler = @ptrCast(@alignCast(ctx));
-        self.parent.pollError(self.renderer, self.compositor_state) catch |e| {
-            logger.err("Failed to poll: {t}", .{e});
-            return .in_progress;
-        };
-
-        return .in_progress;
-    }
-};
-
-fn makeHandlers(ctx: ?*anyopaque, alloc: std.mem.Allocator, renderer: *rendering.Renderer, compositor_state: *CompositorState) ![]sphtud.event.Loop.Handler {
-    const self: *WaylandRenderBackend = @ptrCast(@alignCast(ctx));
-    const fd = self.window.getFd();
-
-    const handler_ctx = try alloc.create(Handler);
-    handler_ctx.* = .{
-        .parent = self,
-        .renderer = renderer,
-        .compositor_state = compositor_state,
-    };
-
-    const handlers = try alloc.alloc(sphtud.event.Loop.Handler, 1);
-    handlers[0] = .{
-        .ptr = handler_ctx,
-        .fd = fd,
-        .desired_events = .{
-            .read = true,
-            .write = false,
-        },
-        .vtable = &.{
-            .poll = Handler.poll,
-            .close = Handler.close,
-        },
-    };
-
-    return handlers;
-}
-
-fn pollError(self: *WaylandRenderBackend, renderer: *rendering.Renderer, compositor_state: *CompositorState) !void {
+pub fn service(self: *WaylandRenderBackend, renderer: *rendering.Renderer, compositor_state: *CompositorState) !void {
     if (try self.window.service(GlCtxProxy{
         .outstanding_buffers = &self.outstanding_buffers,
         .renderer = renderer,
@@ -114,7 +59,7 @@ fn displayBuffer(self: *WaylandRenderBackend, renderer: *rendering.Renderer, buf
     errdefer renderer.gbm_ctx.unlock(buffer);
 
     const fd = try buffer.fd();
-    defer std.posix.close(fd);
+    defer sphtud.io.close(fd);
 
     const client_raw_buffer = sphwindow.RenderBuffer{
         .fd = fd,
