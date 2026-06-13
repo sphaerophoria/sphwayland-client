@@ -5,6 +5,7 @@ const wlb = @import("wl_bindings");
 const system = @import("system.zig");
 const c = @cImport({
     @cInclude("linux/input-event-codes.h");
+    @cInclude("xkbcommon/xkbcommon.h");
 });
 
 const BoundInterfaces = struct {
@@ -207,6 +208,29 @@ pub const RenderBuffer = struct {
     }
 };
 
+pub const Key = struct {
+    scancode: u32,
+    state: State,
+
+    const State = enum(u8) {
+        released = wlb.WlKeyboard.Enums.KeyState.released,
+        pressed = wlb.WlKeyboard.Enums.KeyState.pressed,
+    };
+
+    pub fn toUtf8(self: Key, buf: *[5]u8, window: *const Window) ![]const u8 {
+        // The simple answer here is that the libxkbcommon docs and the wayland
+        // protocol docs both say to do this
+        //
+        // The longer explanation is at https://youtu.be/2iJlbg0IuSE
+        const keycode = self.scancode + 8;
+
+        const keymap = window.keymap orelse return error.NoKeymap;
+
+        const len = c.xkb_state_key_get_utf8(keymap.state, keycode, buf, buf.len);
+        return buf[0..@intCast(len)];
+    }
+};
+
 pub const Window = struct {
     compositor: wlb.WlCompositor,
     xdg_wm_base: wlb.XdgWmBase,
@@ -217,6 +241,13 @@ pub const Window = struct {
     client: wlclient.Client(wlb),
     frame_callback: wlb.WlCallback,
     wl_pointer: wlb.WlPointer,
+    wl_keyboard: wlb.WlKeyboard,
+
+    xkb: *c.xkb_context,
+    keymap: ?struct {
+        keymap: *c.xkb_keymap,
+        state: *c.xkb_state,
+    },
 
     first_configure: bool = true,
     wants_frame: bool = false,
@@ -246,6 +277,7 @@ pub const Window = struct {
 
     const InputEvent = union(enum) {
         pointer_movement: PointerPos,
+        key: Key,
         mouse1_down,
         mouse1_up,
     };
@@ -271,9 +303,17 @@ pub const Window = struct {
 
         const bound_interfaces = try bindInterfaces(&client);
 
+        const xkb_context: *c.xkb_context = c.xkb_context_new(0) orelse return error.XkbInit;
+        errdefer c.xkb_context_unref(xkb_context);
+
         const wl_pointer = try client.newId(wlb.WlPointer);
         try bound_interfaces.wl_seat.getPointer(writer, .{
             .id = wl_pointer.id,
+        });
+
+        const wl_keyboard = try client.newId(wlb.WlKeyboard);
+        try bound_interfaces.wl_seat.getKeyboard(writer, .{
+            .id = wl_keyboard.id,
         });
 
         const surface_feedback = try client.newId(wlb.ZwpLinuxDmabufFeedbackV1);
@@ -321,6 +361,9 @@ pub const Window = struct {
             .wl_seat = bound_interfaces.wl_seat,
             .xdg_surface = xdg_surface,
             .wl_pointer = wl_pointer,
+            .wl_keyboard = wl_keyboard,
+            .xkb = xkb_context,
+            .keymap = null,
             .frame_callback = frame_callback,
             .client = client,
             .alloc = expansion_alloc,
@@ -340,7 +383,17 @@ pub const Window = struct {
     }
 
     pub fn deinit(self: *Window) void {
+        self.deinitKeymap();
+        c.xkb_context_unref(self.xkb);
         self.client.deinit();
+    }
+
+    fn deinitKeymap(self: *Window) void {
+        if (self.keymap) |km| {
+            c.xkb_state_unref(km.state);
+            c.xkb_keymap_unref(km.keymap);
+        }
+        self.keymap = null;
     }
 
     // By default users will use DefaultGlCtx above, but some users of this
@@ -557,6 +610,58 @@ pub const Window = struct {
                         };
                         try self.pending_input_events.append(self.alloc, input_event);
                     }
+                },
+                else => wlclient.logUnusedEvent(event.event),
+            },
+            .wl_keyboard => |parsed| switch (parsed) {
+                .keymap => |params| blk: {
+                    const Format = wlb.WlKeyboard.Enums.KeymapFormat;
+                    switch (params.format) {
+                        Format.no_keymap => break :blk,
+                        Format.xkb_v1 => {},
+                        else => return error.UnhandledKeymap,
+                    }
+
+                    const fd = event.fd orelse return error.NoFd;
+
+                    const mapped = try std.posix.mmap(
+                        null,
+                        params.size,
+                        std.posix.system.PROT{
+                            .READ = true,
+                        },
+                        .{ .TYPE = .PRIVATE },
+                        fd,
+                        0,
+                    );
+                    defer std.posix.munmap(mapped);
+
+                    {
+                        const keymap = c.xkb_keymap_new_from_string(
+                            self.xkb,
+                            mapped.ptr,
+                            // Stolen from glfw
+                            c.XKB_KEYMAP_FORMAT_TEXT_V1,
+                            c.XKB_KEYMAP_COMPILE_NO_FLAGS,
+                        ) orelse return error.InvalidKeymap;
+                        errdefer c.xkb_keymap_unref(keymap);
+                        const state = c.xkb_state_new(keymap) orelse return error.XkbState;
+
+                        self.deinitKeymap();
+
+                        self.keymap = .{
+                            .keymap = keymap,
+                            .state = state,
+                        };
+                    }
+                },
+                .key => |params| {
+                    try self.input_events.append(self.alloc, .{
+                        .key = .{
+                            .scancode = params.key,
+                            .state = std.enums.fromInt(Key.State, params.state) orelse return error.InvalidState,
+                        },
+                    });
                 },
                 else => wlclient.logUnusedEvent(event.event),
             },

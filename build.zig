@@ -161,6 +161,7 @@ const Builder = struct {
         sphwindow.addImport("sphtud", sphtud);
         sphwindow.linkSystemLibrary("EGL", .{});
         sphwindow.linkSystemLibrary("gbm", .{});
+        sphwindow.linkSystemLibrary("xkbcommon", .{});
 
         return sphwindow;
     }

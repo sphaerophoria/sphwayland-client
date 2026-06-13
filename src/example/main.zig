@@ -57,6 +57,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 .mouse1_up => {
                     std.debug.print("Mouse released\n", .{});
                 },
+                .key => |k| {
+                    var utf8_buf: [5]u8 = undefined;
+                    const s = try k.toUtf8(&utf8_buf, &window);
+                    std.debug.print("Got key: {s} ({d}) {t}\n", .{ s, k.scancode, k.state });
+                },
             }
         }
 
