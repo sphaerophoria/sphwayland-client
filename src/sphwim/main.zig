@@ -64,6 +64,7 @@ const Ids = struct {
     backend: backend.Ids,
     wayland: wayland.WaylandServer.Ids,
     memory_dumper: usize,
+    signal: usize,
 
     const max_wl_clients = 4096;
 
@@ -74,13 +75,34 @@ const Ids = struct {
             .backend = .init(&alloc),
             .wayland = .init(&alloc, max_wl_clients),
             .memory_dumper = alloc.allocOne(),
+            .signal = alloc.allocOne(),
         };
     }
 };
 
 const ids = Ids.init();
 
+fn genBlockMask() std.os.linux.sigset_t {
+    const system = std.os.linux;
+    var set = system.sigemptyset();
+    system.sigaddset(&set, system.SIG.PIPE);
+    system.sigaddset(&set, system.SIG.INT);
+    return set;
+}
+
+fn genFdMask() std.os.linux.sigset_t {
+    const system = std.os.linux;
+    var set = system.sigemptyset();
+    system.sigaddset(&set, system.SIG.INT);
+    return set;
+}
+
+const block_sigmask = genBlockMask();
+const fd_sigmask = genFdMask();
+
 pub fn main(init: std.process.Init.Minimal) !void {
+    _ = std.os.linux.sigprocmask(std.os.linux.SIG.BLOCK, &block_sigmask, null);
+
     var tpa: sphtud.alloc.TinyPageAllocator = undefined;
     try tpa.initPinned();
 
@@ -154,6 +176,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     defer sphtud.io.unlink(server.socket_path) catch {};
 
+    const signal_fd = try sphtud.io.signalfd(&fd_sigmask);
+    try loop.register(.{
+        .id = ids.signal,
+        .handle = signal_fd,
+        .read = true,
+        .write = false,
+    });
+
     try render_backend.serviceFirst(&renderer, &compositor_state);
 
     while (system_running) {
@@ -169,6 +199,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
             },
             ids.memory_dumper => {
                 try memory_dumper.service();
+            },
+            ids.signal => {
+                system_running = false;
             },
             else => unreachable,
         }
