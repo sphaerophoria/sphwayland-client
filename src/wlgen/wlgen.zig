@@ -87,6 +87,7 @@ const Interface = struct {
     description: []const u8,
     requests: []RequestEvent,
     events: []RequestEvent,
+    enums: []Enum,
 
     const RequestEvent = struct {
         name: []const u8 = &.{},
@@ -131,14 +132,31 @@ const Interface = struct {
         };
     };
 
+    const Enum = struct {
+        name: []const u8,
+        items: []Item,
+
+        const Item = struct {
+            name: []const u8,
+            val: u32,
+        };
+
+        const Builder = struct {
+            name: []const u8 = "",
+            items: std.ArrayListUnmanaged(Item) = .empty,
+        };
+    };
+
     const Builder = struct {
         name: []const u8 = &.{},
         version: u32 = 0,
         description: std.ArrayListUnmanaged(u8) = .empty,
         requests: std.ArrayListUnmanaged(RequestEvent) = .empty,
         events: std.ArrayListUnmanaged(RequestEvent) = .empty,
+        enums: std.ArrayListUnmanaged(Enum) = .empty,
 
         unfininshed_request_event: RequestEvent.Builder = .{},
+        unfinished_enum: Enum.Builder = .{},
 
         pub fn init(alloc: Allocator, attrs: *sphtud.xml.AttributeIt) !Builder {
             var name: ?[]const u8 = null;
@@ -169,6 +187,45 @@ const Interface = struct {
             try self.unfininshed_request_event.args.append(alloc, arg);
         }
 
+        pub fn pushNewEnum(self: *Builder, alloc: Allocator, attrs: *sphtud.xml.AttributeIt) !void {
+            self.unfinished_enum = .{};
+
+            while (try attrs.next()) |attr| {
+                if (std.mem.eql(u8, attr.key, "name")) {
+                    self.unfinished_enum.name = try alloc.dupe(u8, attr.val);
+                }
+            }
+        }
+
+        pub fn pushEnumEntry(self: *Builder, alloc: Allocator, attrs: *sphtud.xml.AttributeIt) !void {
+            var name: []const u8 = "";
+            var val: ?u32 = null;
+
+            while (try attrs.next()) |attr| {
+                if (std.mem.eql(u8, attr.key, "name")) {
+                    name = try alloc.dupe(u8, attr.val);
+                } else if (std.mem.eql(u8, attr.key, "value")) {
+                    val = try std.fmt.parseInt(u32, attr.val, 0);
+                }
+            }
+
+            try self.unfinished_enum.items.append(alloc, .{
+                .name = name,
+                .val = val orelse return error.NoEnumValue,
+            });
+        }
+
+        pub fn finishEnum(self: *Builder, alloc: Allocator) !void {
+            try self.enums.append(
+                alloc,
+                .{
+                    .name = self.unfinished_enum.name,
+                    .items = self.unfinished_enum.items.items,
+                },
+            );
+            self.unfinished_enum = .{};
+        }
+
         pub fn finishReq(self: *Builder, alloc: Allocator) !void {
             try self.requests.append(
                 alloc,
@@ -191,6 +248,7 @@ const Interface = struct {
                 .description = self.description.items,
                 .requests = self.requests.items,
                 .events = self.events.items,
+                .enums = self.enums.items,
             };
         }
     };
@@ -218,6 +276,7 @@ const WaylandXmlParser = struct {
         event,
         event_description,
         event_arg,
+        @"enum",
     };
     const ReqEventTag = enum {
         arg,
@@ -234,6 +293,7 @@ const WaylandXmlParser = struct {
             .interface => try self.onInterfaceEnter(name, attrs),
             .request => try self.onRequestEnter(name, attrs),
             .event => try self.onEventEnter(name, attrs),
+            .@"enum" => try self.onEnumEnter(name, attrs),
             .unknown => {
                 self.unknown_level += 1;
             },
@@ -254,8 +314,7 @@ const WaylandXmlParser = struct {
     }
 
     fn onInterfaceEnter(self: *WaylandXmlParser, name: []const u8, attrs: *sphtud.xml.AttributeIt) !void {
-        // FIXME: event
-        const InterfaceTag = enum { description, request, event };
+        const InterfaceTag = enum { description, request, event, @"enum" };
 
         const tag = std.meta.stringToEnum(InterfaceTag, name) orelse {
             std.log.debug("Unhandled interface child {s}", .{name});
@@ -274,6 +333,10 @@ const WaylandXmlParser = struct {
             .event => {
                 try self.unfinished_interface.pushNewReqEvent(self.alloc, attrs);
                 self.state = .event;
+            },
+            .@"enum" => {
+                self.state = .@"enum";
+                try self.unfinished_interface.pushNewEnum(self.alloc, attrs);
             },
         }
     }
@@ -322,6 +385,17 @@ const WaylandXmlParser = struct {
         }
     }
 
+    fn onEnumEnter(self: *WaylandXmlParser, name: []const u8, attrs: *sphtud.xml.AttributeIt) !void {
+        if (!std.mem.eql(u8, name, "entry")) {
+            std.log.debug("Unhandled enum child {s}", .{name});
+            self.setStateUnknown(.@"enum");
+            return;
+        }
+
+        try self.unfinished_interface.pushEnumEntry(self.alloc, attrs);
+        self.setStateUnknown(.@"enum");
+    }
+
     fn exitState(self: *WaylandXmlParser) void {
         self.state = switch (self.state) {
             .top => blk: {
@@ -337,6 +411,7 @@ const WaylandXmlParser = struct {
             .event => .interface,
             .event_description => .event,
             .event_arg => .event,
+            .@"enum" => .interface,
             .unknown => blk: {
                 self.unknown_level -= 1;
                 if (self.unknown_level == 0) {
@@ -361,6 +436,9 @@ const WaylandXmlParser = struct {
             },
             .event => {
                 try self.unfinished_interface.finishEvent(self.alloc);
+            },
+            .@"enum" => {
+                try self.unfinished_interface.finishEnum(self.alloc);
             },
             else => {},
         }
@@ -687,7 +765,22 @@ const ZigBindingsWriter = struct {
         );
     }
 
-    fn writeInterface(self: *ZigBindingsWriter, interface_name: []const u8, outgoing: []const Interface.RequestEvent, incoming: []const Interface.RequestEvent) !void {
+    fn writeEnum(self: *ZigBindingsWriter, en: Interface.Enum) !void {
+        try self.writer.print(
+            \\        pub const {f} = struct {{
+            \\
+        , .{snakeToPascal(en.name)});
+
+        for (en.items) |item| {
+            try self.writer.print(
+                "            pub const @\"{s}\" = {d};\n",
+                .{ item.name, item.val },
+            );
+        }
+        try self.writer.writeAll("        };\n\n");
+    }
+
+    fn writeInterface(self: *ZigBindingsWriter, interface_name: []const u8, outgoing: []const Interface.RequestEvent, incoming: []const Interface.RequestEvent, enums: []const Interface.Enum) !void {
         try self.writeInterfaceStart(interface_name);
 
         for (outgoing, 0..) |req, i| {
@@ -719,6 +812,12 @@ const ZigBindingsWriter = struct {
 
             try self.writeEventsEnd();
         }
+
+        try self.writer.writeAll("pub const Enums = struct {\n");
+        for (enums) |en| {
+            try self.writeEnum(en);
+        }
+        try self.writer.writeAll("\n};\n");
 
         try self.writeInterfaceEnd();
     }
@@ -828,7 +927,7 @@ pub fn main(init: std.process.Init) !void {
             .client => .{ interface.requests, interface.events },
             .server => .{ interface.events, interface.requests },
         };
-        try zig_writer.writeInterface(interface.name, outgoing, incoming);
+        try zig_writer.writeInterface(interface.name, outgoing, incoming, interface.enums);
     }
 
     try output_writer.interface.flush();
