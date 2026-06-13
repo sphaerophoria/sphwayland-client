@@ -557,13 +557,15 @@ const ZigBindingsWriter = struct {
         );
     }
 
-    fn writeInterfaceStart(self: *ZigBindingsWriter, interface_name: []const u8) !void {
+    fn writeInterfaceStart(self: *ZigBindingsWriter, interface_name: []const u8, interface_version: u32) !void {
         try self.writer.print(
             \\pub const {f} = struct {{
+            \\    pub const version = {d};
+            \\
             \\    id: u32,
             \\
             \\
-        , .{snakeToPascal(interface_name)});
+        , .{ snakeToPascal(interface_name), interface_version });
     }
 
     fn writeInterfaceEnd(self: *ZigBindingsWriter) !void {
@@ -783,8 +785,8 @@ const ZigBindingsWriter = struct {
         try self.writer.writeAll("        };\n\n");
     }
 
-    fn writeInterface(self: *ZigBindingsWriter, interface_name: []const u8, outgoing: []const Interface.RequestEvent, incoming: []const Interface.RequestEvent, enums: []const Interface.Enum) !void {
-        try self.writeInterfaceStart(interface_name);
+    fn writeInterface(self: *ZigBindingsWriter, interface_name: []const u8, interface_version: u32, outgoing: []const Interface.RequestEvent, incoming: []const Interface.RequestEvent, enums: []const Interface.Enum) !void {
+        try self.writeInterfaceStart(interface_name, interface_version);
 
         for (outgoing, 0..) |req, i| {
             try self.writeInterfaceReq(interface_name, req, i);
@@ -930,7 +932,7 @@ pub fn main(init: std.process.Init) !void {
             .client => .{ interface.requests, interface.events },
             .server => .{ interface.events, interface.requests },
         };
-        try zig_writer.writeInterface(interface.name, outgoing, incoming, interface.enums);
+        try zig_writer.writeInterface(interface.name, interface.version, outgoing, incoming, interface.enums);
     }
 
     try output_writer.interface.flush();

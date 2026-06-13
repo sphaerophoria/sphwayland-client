@@ -126,7 +126,7 @@ pub fn InterfaceRegistry(comptime Bindings: type) type {
 
             try self.registry.bind(writer, .{
                 .id_interface = params.interface,
-                .id_interface_version = params.version,
+                .id_interface_version = T.version,
                 .name = params.name,
                 .id = self.idx,
             });
