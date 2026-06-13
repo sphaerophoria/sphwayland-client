@@ -47,12 +47,10 @@ const Arg = struct {
 
     fn init(alloc: Allocator, attrs: *sphtud.xml.AttributeIt) !Arg {
         var name: ?[]const u8 = null;
-        errdefer if (name) |n| alloc.free(n);
 
         var typ: ?Arg.Type = null;
 
         var summary: []const u8 = &.{};
-        errdefer alloc.free(summary);
 
         var has_interface = false;
 
@@ -81,11 +79,6 @@ const Arg = struct {
             .typ = typ orelse return error.NoArgType,
         };
     }
-
-    fn deinit(self: *Arg, alloc: Allocator) void {
-        alloc.free(self.name);
-        alloc.free(self.summary);
-    }
 };
 
 const Interface = struct {
@@ -110,7 +103,6 @@ const Interface = struct {
             fn init(alloc: Allocator, attrs: *sphtud.xml.AttributeIt) !@This() {
                 var name: ?[]const u8 = null;
                 var min_version: u32 = 0;
-                errdefer if (name) |n| alloc.free(n);
 
                 while (try attrs.next()) |attr| {
                     if (std.mem.eql(u8, attr.key, "name")) {
@@ -126,38 +118,18 @@ const Interface = struct {
                 };
             }
 
-            fn deinit(self: *@This(), alloc: Allocator) void {
-                alloc.free(self.name);
-                self.description.deinit(alloc);
-                for (self.args.items) |*arg| {
-                    arg.deinit(alloc);
-                }
-                self.args.deinit(alloc);
-            }
-
-            fn finish(self: *@This(), alloc: Allocator) !RequestEvent {
+            fn finish(self: *@This()) RequestEvent {
                 defer self.* = .{};
 
                 return .{
                     .name = self.name,
-                    .description = try self.description.toOwnedSlice(alloc),
-                    .args = try self.args.toOwnedSlice(alloc),
+                    .description = self.description.items,
+                    .args = self.args.items,
                     .min_version = self.min_version,
                 };
             }
         };
-
-        pub fn deinit(self: *RequestEvent, alloc: Allocator) void {
-            alloc.free(self.name);
-            alloc.free(self.description);
-            for (self.args) |*arg| {
-                arg.deinit(alloc);
-            }
-            alloc.free(self.args);
-        }
     };
-
-    const Event = struct {};
 
     const Builder = struct {
         name: []const u8 = &.{},
@@ -170,7 +142,6 @@ const Interface = struct {
 
         pub fn init(alloc: Allocator, attrs: *sphtud.xml.AttributeIt) !Builder {
             var name: ?[]const u8 = null;
-            errdefer if (name) |n| alloc.free(n);
             var version: ?u32 = null;
 
             const Field = enum { name, version };
@@ -201,55 +172,28 @@ const Interface = struct {
         pub fn finishReq(self: *Builder, alloc: Allocator) !void {
             try self.requests.append(
                 alloc,
-                try self.unfininshed_request_event.finish(alloc),
+                self.unfininshed_request_event.finish(),
             );
         }
 
         pub fn finishEvent(self: *Builder, alloc: Allocator) !void {
             try self.events.append(
                 alloc,
-                try self.unfininshed_request_event.finish(alloc),
+                self.unfininshed_request_event.finish(),
             );
         }
 
-        pub fn deinit(self: *Builder, alloc: Allocator) void {
-            alloc.free(self.name);
-            self.description.deinit(alloc);
-            for (self.requests.items) |*item| {
-                item.deinit(alloc);
-            }
-            self.requests.deinit(alloc);
-            self.unfininshed_request_event.deinit(alloc);
-            for (self.events.items) |*item| {
-                item.deinit(alloc);
-            }
-            self.events.deinit(alloc);
-        }
-
-        fn finish(self: *Builder, alloc: Allocator) !Interface {
+        fn finish(self: *Builder) Interface {
             defer self.* = .{};
             return .{
                 .name = self.name,
                 .version = self.version,
-                .description = try self.description.toOwnedSlice(alloc),
-                .requests = try self.requests.toOwnedSlice(alloc),
-                .events = try self.events.toOwnedSlice(alloc),
+                .description = self.description.items,
+                .requests = self.requests.items,
+                .events = self.events.items,
             };
         }
     };
-
-    pub fn deinit(self: *Interface, alloc: Allocator) void {
-        alloc.free(self.name);
-        alloc.free(self.description);
-        for (self.requests) |*req| {
-            req.deinit(alloc);
-        }
-        alloc.free(self.requests);
-        for (self.events) |*req| {
-            req.deinit(alloc);
-        }
-        alloc.free(self.events);
-    }
 };
 
 const WaylandXmlParser = struct {
@@ -279,14 +223,6 @@ const WaylandXmlParser = struct {
         arg,
         description,
     };
-
-    fn deinit(self: *WaylandXmlParser) void {
-        for (self.interfaces.items) |*interface| {
-            interface.deinit(self.alloc);
-        }
-        self.interfaces.deinit(self.alloc);
-        self.unfinished_interface.deinit(self.alloc);
-    }
 
     fn onEnter(self: *WaylandXmlParser, name: []const u8, attrs: *sphtud.xml.AttributeIt) anyerror!void {
         switch (self.state) {
@@ -417,7 +353,7 @@ const WaylandXmlParser = struct {
             .interface => {
                 try self.interfaces.append(
                     self.alloc,
-                    try self.unfinished_interface.finish(self.alloc),
+                    self.unfinished_interface.finish(),
                 );
             },
             .request => {
@@ -783,24 +719,27 @@ const ZigBindingsWriter = struct {
 
             try self.writeEventsEnd();
         }
+
         try self.writeInterfaceEnd();
     }
 };
 
-fn parseWaylandXml(alloc: Allocator, io: std.Io, wayland_xml_path: []const u8) ![]Interface {
+fn parseWaylandXml(ret_alloc: Allocator, scratch: sphtud.alloc.LinearAllocator, io: std.Io, wayland_xml_path: []const u8) ![]Interface {
+    const cp = scratch.checkpoint();
+    defer scratch.restore(cp);
+
     var wayland_parser = WaylandXmlParser{
-        .alloc = alloc,
+        .alloc = ret_alloc,
     };
-    defer wayland_parser.deinit();
 
     const wayland_xml_file = try std.Io.Dir.cwd().openFile(io, wayland_xml_path, .{});
     defer wayland_xml_file.close(io);
     var buf: [4096]u8 = undefined;
+
     var wayland_xml_reader = wayland_xml_file.reader(io, &buf);
     var parser = XmlParser.init(&wayland_xml_reader.interface);
 
-    const wayland_xml_data = try wayland_xml_reader.interface.allocRemaining(alloc, .unlimited);
-    defer alloc.free(wayland_xml_data);
+    const wayland_xml_data = try wayland_xml_reader.interface.allocRemaining(scratch.allocator(), .unlimited);
     try wayland_xml_reader.seekTo(0);
 
     var discarding = std.Io.Writer.Discarding.init(&.{});
@@ -820,7 +759,7 @@ fn parseWaylandXml(alloc: Allocator, io: std.Io, wayland_xml_path: []const u8) !
         }
     }
 
-    return try wayland_parser.interfaces.toOwnedSlice(alloc);
+    return wayland_parser.interfaces.items;
 }
 
 const BindingsMode = enum {
@@ -856,18 +795,14 @@ const Args = struct {
             .it = it,
         };
     }
-
-    fn deinit(self: *Args, alloc: std.mem.Allocator) void {
-        alloc.free(self.inputs);
-        self.it.deinit();
-    }
 };
 
 pub fn main(init: std.process.Init) !void {
-    const alloc = init.gpa;
+    var buf_alloc = sphtud.alloc.BufAllocator.init(try init.arena.allocator().alloc(u8, 2 * 1024 * 1024));
+    const alloc = buf_alloc.allocator();
+    const scratch = buf_alloc.backLinear();
 
-    var args = try Args.parse(alloc, init.minimal.args);
-    defer args.deinit(alloc);
+    const args = try Args.parse(alloc, init.minimal.args);
 
     const output_file = try std.Io.Dir.cwd().createFile(init.io, args.output, .{});
     defer output_file.close(init.io);
@@ -879,14 +814,9 @@ pub fn main(init: std.process.Init) !void {
     try zig_writer.writeImports();
 
     var interfaces = std.ArrayList(Interface).empty;
-    defer {
-        for (interfaces.items) |*interface| interface.deinit(alloc);
-        interfaces.deinit(alloc);
-    }
-    for (args.inputs) |wayland_xml_path| {
-        const xml_interfaces = try parseWaylandXml(alloc, init.io, wayland_xml_path);
-        defer alloc.free(xml_interfaces);
 
+    for (args.inputs) |wayland_xml_path| {
+        const xml_interfaces = try parseWaylandXml(alloc, scratch, init.io, wayland_xml_path);
         try interfaces.appendSlice(alloc, xml_interfaces);
     }
 
