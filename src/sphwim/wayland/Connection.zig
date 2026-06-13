@@ -232,11 +232,11 @@ fn pollError(self: *Connection, diagnostics: *HandleMessageDiagnostics) !void {
         const header = try self.io_reader.peekStruct(wlio.HeaderLE, .little);
         const data = (try self.io_reader.peek(header.size))[@sizeOf(wlio.HeaderLE)..];
 
-        const interface_id = self.interface_registry.get(header.id) orelse {
+        const interface_info = self.interface_registry.get(header.id) orelse {
             return diagnostics.makeInvalidObjectError("cannot find interface for object {d}", .{header.id});
         };
 
-        const req = parseRequest(header.op, data, interface_id) catch |e| switch (e) {
+        const req = parseRequest(header.op, data, interface_info.id) catch |e| switch (e) {
             error.InvalidLen, error.UnknownMessage => {
                 return diagnostics.makeInvalidMethodError("received malformed request", .{});
             },
@@ -276,7 +276,7 @@ fn pollError(self: *Connection, diagnostics: *HandleMessageDiagnostics) !void {
         _ = try self.io_reader.discard(.limited(header.size));
         retrying = false;
 
-        try self.handleMessage(header.id, req, fd, diagnostics);
+        try self.handleMessage(header.id, req, interface_info.version, fd, diagnostics);
         try self.io_writer.flush();
     }
 }
@@ -375,7 +375,7 @@ const HandleMessageError = error{
     WriteFailed,
 };
 
-fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomingMessage, fd: ?std.posix.fd_t, diagnostics: *HandleMessageDiagnostics) HandleMessageError!void {
+fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomingMessage, version: u32, fd: ?std.posix.fd_t, diagnostics: *HandleMessageDiagnostics) HandleMessageError!void {
     logger.debug("Received {f}", .{formatRequest(req)});
 
     const supported_interfaces: []const Bindings.WaylandInterfaceType = &.{
@@ -390,7 +390,7 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
     switch (req) {
         .wl_display => |parsed| switch (parsed) {
             .get_registry => |params| {
-                try self.interface_registry.put(params.registry, .wl_registry, diagnostics);
+                try self.interface_registry.put(params.registry, .wl_registry, 1, diagnostics);
 
                 const registry = Bindings.WlRegistry{ .id = params.registry };
                 for (supported_interfaces) |interface| {
@@ -414,7 +414,7 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
         .wl_registry => |parsed| switch (parsed) {
             .bind => |params| {
                 const interface: Bindings.WaylandInterfaceType = @enumFromInt(params.name);
-                try self.interface_registry.put(params.id, interface, diagnostics);
+                try self.interface_registry.put(params.id, interface, params.id_interface_version, diagnostics);
             },
         },
         .wl_region => |parsed| switch (parsed) {
@@ -427,15 +427,15 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
             .create_surface => |params| {
                 const wl_surface_id = WlSurfaceId{ .inner = params.id };
                 try self.wl_surfaces.put(wl_surface_id, .{});
-                try self.interface_registry.put(params.id, .wl_surface, diagnostics);
+                try self.interface_registry.put(params.id, .wl_surface, version, diagnostics);
             },
             .create_region => |params| {
-                try self.interface_registry.put(params.id, .wl_region, diagnostics);
+                try self.interface_registry.put(params.id, .wl_region, version, diagnostics);
             },
         },
         .wl_shm => |parsed| switch (parsed) {
             .create_pool => |params| {
-                try self.interface_registry.put(params.id, .wl_shm_pool, diagnostics);
+                try self.interface_registry.put(params.id, .wl_shm_pool, version, diagnostics);
             },
             else => {
                 logUnhandledRequest(object_id, req);
@@ -447,7 +447,7 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
                 self.interface_registry.remove(object_id);
             },
             .create_buffer => |params| {
-                try self.interface_registry.put(params.id, .wl_buffer, diagnostics);
+                try self.interface_registry.put(params.id, .wl_buffer, version, diagnostics);
 
                 const wl_buffer_id = WlBufferId{ .inner = params.id };
                 {
@@ -472,7 +472,7 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
 
                 surface.xdg_surface_id = xdg_id;
                 try self.xdg_surfaces.put(xdg_id, wl_surface_id);
-                try self.interface_registry.put(params.id, .xdg_surface, diagnostics);
+                try self.interface_registry.put(params.id, .xdg_surface, version, diagnostics);
 
                 try self.emitXdgSurfaceConfigure(xdg_id, surface);
             },
@@ -485,7 +485,7 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
             .get_toplevel => |params| {
                 const toplevel_id = XdgToplevelId{ .inner = params.id };
                 try self.windows.put(toplevel_id, .{});
-                try self.interface_registry.put(params.id, .xdg_toplevel, diagnostics);
+                try self.interface_registry.put(params.id, .xdg_toplevel, version, diagnostics);
                 const toplevel = Bindings.XdgToplevel{ .id = params.id };
 
                 try toplevel.configure(self.io_writer, .{
@@ -651,7 +651,7 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
                 // ours anymore
                 buf_params_opt.* = null;
 
-                try self.interface_registry.put(wl_buffer_id.inner, .wl_buffer, diagnostics);
+                try self.interface_registry.put(wl_buffer_id.inner, .wl_buffer, version, diagnostics);
 
                 const iface = Bindings.ZwpLinuxBufferParamsV1{ .id = object_id };
                 try iface.created(self.io_writer, .{
@@ -680,13 +680,13 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
             .create_params => |params| {
                 const zwp_buf_params_id = ZwpBufferParamsId{ .inner = params.params_id };
                 try self.zwp_params.put(zwp_buf_params_id, null);
-                try self.interface_registry.put(params.params_id, .zwp_linux_buffer_params_v1, diagnostics);
+                try self.interface_registry.put(params.params_id, .zwp_linux_buffer_params_v1, version, diagnostics);
             },
             .get_default_feedback => |params| {
-                try self.sendSurfaceFeedback(params, diagnostics);
+                try self.sendSurfaceFeedback(version, params, diagnostics);
             },
             .get_surface_feedback => |params| {
-                try self.sendSurfaceFeedback(params, diagnostics);
+                try self.sendSurfaceFeedback(version, params, diagnostics);
             },
             else => {
                 logUnhandledRequest(object_id, req);
@@ -700,7 +700,7 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
         },
         .zxdg_decoration_manager_v1 => |parsed| switch (parsed) {
             .get_toplevel_decoration => |params| {
-                try self.interface_registry.put(params.id, .zxdg_toplevel_decoration_v1, diagnostics);
+                try self.interface_registry.put(params.id, .zxdg_toplevel_decoration_v1, version, diagnostics);
             },
             // FIXME: handle destroy
             else => {
@@ -732,7 +732,12 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
 }
 
 const InterfaceRegistry = struct {
-    inner: sphtud.util.AutoHashMap(u32, Bindings.WaylandInterfaceType),
+    inner: sphtud.util.AutoHashMap(u32, Item),
+
+    pub const Item = struct {
+        id: Bindings.WaylandInterfaceType,
+        version: u32,
+    };
 
     fn init(sphalloc: *sphtud.alloc.Sphalloc) !InterfaceRegistry {
         var ret: InterfaceRegistry = .{
@@ -743,26 +748,32 @@ const InterfaceRegistry = struct {
                 4096,
             ),
         };
-        try ret.inner.put(display_id, .wl_display);
+        try ret.inner.put(display_id, .{
+            .id = .wl_display,
+            .version = 1,
+        });
         return ret;
     }
 
-    fn put(self: *InterfaceRegistry, object_id: u32, interface_type: Bindings.WaylandInterfaceType, diagnostics: *HandleMessageDiagnostics) !void {
+    fn put(self: *InterfaceRegistry, object_id: u32, interface_type: Bindings.WaylandInterfaceType, version: u32, diagnostics: *HandleMessageDiagnostics) !void {
         logger.debug("Registering {d} -> {t}", .{ object_id, interface_type });
         const gop = try self.inner.getOrPut(object_id);
 
         if (gop.found_existing) {
-            return diagnostics.makeInvalidMethodError("id {d} already bound to {t}", .{ object_id, gop.val.* });
+            return diagnostics.makeInvalidMethodError("id {d} already bound to {t}", .{ object_id, gop.val.id });
         }
 
-        gop.val.* = interface_type;
+        gop.val.* = .{
+            .id = interface_type,
+            .version = version,
+        };
     }
 
     fn remove(self: *InterfaceRegistry, object_id: u32) void {
         _ = self.inner.remove(object_id);
     }
 
-    fn get(self: *const InterfaceRegistry, object_id: u32) ?Bindings.WaylandInterfaceType {
+    fn get(self: *const InterfaceRegistry, object_id: u32) ?Item {
         return self.inner.get(object_id);
     }
 };
@@ -784,7 +795,7 @@ fn logUnhandledRequest(object_id: u32, req: Bindings.WaylandIncomingMessage) voi
     logger.warn("Unhandled request by object {d}, {any}", .{ object_id, req });
 }
 
-fn sendSurfaceFeedback(self: *Connection, params: anytype, diagnostics: *HandleMessageDiagnostics) !void {
+fn sendSurfaceFeedback(self: *Connection, version: u32, params: anytype, diagnostics: *HandleMessageDiagnostics) !void {
     // If we implement GPU switching later, this will have to be stored and notified, but for now it's nbd :)
     const feedback_interface = Bindings.ZwpLinuxDmabufFeedbackV1{ .id = params.id };
 
@@ -832,7 +843,7 @@ fn sendSurfaceFeedback(self: *Connection, params: anytype, diagnostics: *HandleM
     }
 
     try feedback_interface.done(self.io_writer, .{});
-    try self.interface_registry.put(params.id, .zwp_linux_dmabuf_feedback_v1, diagnostics);
+    try self.interface_registry.put(params.id, .zwp_linux_dmabuf_feedback_v1, version, diagnostics);
 }
 
 fn emitXdgSurfaceConfigure(self: *Connection, id: XdgSurfaceId, surface: *Surface) !void {

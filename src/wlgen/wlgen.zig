@@ -99,24 +99,30 @@ const Interface = struct {
         name: []const u8 = &.{},
         description: []const u8 = &.{},
         args: []Arg = &.{},
+        min_version: u32,
 
         const Builder = struct {
             name: []const u8 = &.{},
             description: std.ArrayListUnmanaged(u8) = .empty,
             args: std.ArrayListUnmanaged(Arg) = .empty,
+            min_version: u32 = 0,
 
             fn init(alloc: Allocator, attrs: *sphtud.xml.AttributeIt) !@This() {
                 var name: ?[]const u8 = null;
+                var min_version: u32 = 0;
                 errdefer if (name) |n| alloc.free(n);
 
                 while (try attrs.next()) |attr| {
                     if (std.mem.eql(u8, attr.key, "name")) {
                         name = try alloc.dupe(u8, attr.val);
+                    } else if (std.mem.eql(u8, attr.key, "since")) {
+                        min_version = try std.fmt.parseInt(u32, attr.val, 0);
                     }
                 }
 
                 return .{
                     .name = name orelse return error.NoReqName,
+                    .min_version = min_version,
                 };
             }
 
@@ -136,6 +142,7 @@ const Interface = struct {
                     .name = self.name,
                     .description = try self.description.toOwnedSlice(alloc),
                     .args = try self.args.toOwnedSlice(alloc),
+                    .min_version = self.min_version,
                 };
             }
         };
@@ -553,9 +560,10 @@ const ZigBindingsWriter = struct {
         try self.writer.print(
             \\    pub const {f}Params = struct {{
             \\        pub const op = {d};
+            \\        pub const min_version = {d};
             \\
         ,
-            .{ snakeToPascal(req.name), i },
+            .{ snakeToPascal(req.name), i, req.min_version },
         );
 
         for (req.args) |arg| {
