@@ -218,7 +218,50 @@ pub const Key = struct {
     };
 
     pub fn toUtf8(self: Key, buf: *[5]u8, window: *const Window) ![]const u8 {
-        // FIXME: Find a source for this
+        // This is pretty hard to find an original source for. As far as I can
+        // tell this is an artifact of the original X11 spec which said
+        // keycodes have to be in the range of [8,255].
+        // https://xorg.freedesktop.org/archive/X11R7.6/doc/xproto/x11protocol.html#keyboards
+        //
+        // Of course we have examples in libxkbcommon of them doing the same
+        // thing
+        // https://github.com/xkbcommon/libxkbcommon/blob/db8dc5ad75d3c7da84adea9a820c4c0c27dabe08/tools/interactive-evdev.c#L44
+        //
+        // And we have documentation saying that this is what we should be
+        // doing
+        // https://github.com/xkbcommon/libxkbcommon/blob/db8dc5ad75d3c7da84adea9a820c4c0c27dabe08/include/xkbcommon/xkbcommon.h#L180
+        //
+        // The dream would be to find something more concrete, but I think this
+        // is the best we are going to get
+        //
+        // Doing some more reading...
+        //
+        // * I think evdev was released in linux 2.4.0
+        // * I see some notes about moving from scancode set 1 -> set 2 at https://lkml.iu.edu/0210.0/0178.html
+        // * Already at this point we were using XT scancode set 1. Compare
+        //   https://github.com/tmk/tmk_keyboard/wiki/IBM-PC-Keyboard-Converter#default-mapping
+        //   to the input.h header in linux 2.4. At least for the first 83
+        //   keys. Then it looks kinda like they take inspiration from the 101
+        //   key set before they start just going wild
+        //   https://www.osfree.org/docs/cmdref/cmdref.2.0476.php
+        //
+        // https://xorg.freedesktop.org/archive/X11R7.6/doc/xproto/x11protocol.html#keyboards
+        // * keycodes have no intrinsic info
+        // * Keysym comes from mapping a keycode to a symbol using a keymap. AFAICT this
+        //
+        // X11
+        // * https://en.wikipedia.org/wiki/X_Window_System#History
+        // * x10 too hardware dependent
+        // * x11 designed to be hardware abstract
+        // * keycodes reserved for special cases
+        //   * soft proof via anykey being keycode 0
+        //
+        // Xfree86 mirror
+        // https://cgit.freedesktop.org/~libv/xfree86/?__goaway_challenge=meta-refresh&__goaway_id=996606fc6054a16dd661ea5d17b0eb89&__goaway_referer=https%3A%2F%2Fwww.google.com%2F
+        //
+        // xf86-input-evdev
+        // https://bugs.freedesktop.org/show_bug.cgi?id=5903
+        //
         const keycode = self.scancode + 8;
 
         const keymap = window.keymap orelse return error.NoKeymap;
@@ -231,7 +274,7 @@ pub const Key = struct {
         std.debug.assert(len + 1 <= 5);
         const err = c.xkb_state_key_get_utf8(keymap.state, keycode, buf, buf.len);
         if (err != len) return error.InvalidKey;
-        return buf[0 .. @intCast(len)];
+        return buf[0..@intCast(len)];
     }
 };
 
@@ -389,6 +432,11 @@ pub const Window = struct {
     }
 
     pub fn deinit(self: *Window) void {
+        if (self.keymap) |km| {
+            c.xkb_state_unref(km.state);
+            c.xkb_keymap_unref(km.keymap);
+        }
+        c.xkb_context_unref(self.xkb);
         self.client.deinit();
     }
 
@@ -648,11 +696,7 @@ pub const Window = struct {
                     }
                 },
                 .key => |params| {
-                    // FIXME: I think we have to send every key into the xkb
-                    // state whether or not we actually want to send it to the
-                    // user due to key sequences producing inputs
                     try self.input_events.append(self.alloc, .{
-                        // lol x11 history
                         .key = .{
                             .scancode = params.key,
                             .state = std.enums.fromInt(Key.State, params.state) orelse return error.InvalidState,
