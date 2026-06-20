@@ -30,12 +30,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var window = try sphwindow.Window.init(alloc, .linear(alloc), init.environ);
     defer window.deinit();
 
-    var gl_ctx = blk: {
+    var gl_ctx: sphwindow.DefaultGlContext = undefined;
+    {
         const preferred_gpu = try window.getPreferredGpu(alloc);
         defer alloc.free(preferred_gpu);
 
-        break :blk try sphwindow.DefaultGlContext.init(alloc, 640, 480, preferred_gpu);
-    };
+        try gl_ctx.initPinned(640, 480, preferred_gpu);
+    }
     defer gl_ctx.deinit();
 
     initializeGlParams();

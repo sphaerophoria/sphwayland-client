@@ -221,7 +221,12 @@ const WindowFgResult = struct {
     unstable: Windows.UnstableHandle,
 };
 
-fn moveToFront(self: *CompositorState, handle: Windows.UnstableHandle) void {
+pub fn moveToFront(self: *CompositorState, handle: Windows.Handle) void {
+    const uh = self.windows.toUnstable(handle) orelse return;
+    self.moveToFrontUnstable(uh);
+}
+
+fn moveToFrontUnstable(self: *CompositorState, handle: Windows.UnstableHandle) void {
     self.windows.moveToEnd(handle);
 }
 
@@ -303,7 +308,7 @@ pub fn notifyMouse1Down(self: *CompositorState) !void {
         .surface => {},
     }
 
-    self.moveToFront(res.unstable);
+    self.moveToFrontUnstable(res.unstable);
 }
 
 pub const SourceInfo = struct {

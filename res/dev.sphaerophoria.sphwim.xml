@@ -4,5 +4,8 @@
     <method name="GetWindowList" >
       <arg direction="out" type="a{ts}" name="value" />
     </method>
+    <method name="BringToFront" >
+      <arg direction="in" type="t" name="id" />
+    </method>
   </interface>
 </node>

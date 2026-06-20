@@ -98,7 +98,7 @@ pub const EglContext = struct {
     context: c.EGLContext,
     surface: c.EGLSurface,
 
-    pub fn init(alloc: std.mem.Allocator, gbm_context: GbmContext) !EglContext {
+    pub fn init(gbm_context: GbmContext) !EglContext {
         const display = c.eglGetDisplay(gbm_context.device);
         if (display == c.EGL_NO_DISPLAY) {
             return error.NoDisplay;
@@ -124,17 +124,20 @@ pub const EglContext = struct {
         if (c.eglChooseConfig(display, &attribs, null, 0, &num_configs) != c.EGL_TRUE) {
             return error.GetConfigNum;
         }
+        if (num_configs < 0) return error.InvalidNumConfigs;
 
-        const num_configs_u = std.math.cast(usize, num_configs) orelse return error.InvalidNumConfigs;
-        const available_configs = try alloc.alloc(c.EGLConfig, num_configs_u);
-        defer alloc.free(available_configs);
+        var config_buf: [1024]c.EGLConfig = undefined;
+        if (num_configs > config_buf.len) {
+            std.log.warn("Dropping some GL configurations ({d} > {d})", .{ num_configs, config_buf.len });
+        }
+        num_configs = @min(config_buf.len, num_configs);
 
-        if (c.eglChooseConfig(display, &attribs, available_configs.ptr, num_configs, &num_configs) != c.EGL_TRUE) {
+        if (c.eglChooseConfig(display, &attribs, &config_buf, num_configs, &num_configs) != c.EGL_TRUE) {
             return error.ChooseConfig;
         }
 
         var selected_config: ?c.EGLConfig = null;
-        for (available_configs) |config| {
+        for (config_buf[0..@intCast(num_configs)]) |config| {
             var id: c.EGLint = 0;
             if (c.eglGetConfigAttrib(display, config, c.EGL_NATIVE_VISUAL_ID, &id) != c.EGL_TRUE) {
                 continue;
@@ -182,6 +185,10 @@ pub const EglContext = struct {
         }
 
         return surface;
+    }
+
+    pub fn loaderProc(_: *const EglContext) *const fn ([*c]const u8) callconv(.c) ?*const fn () callconv(.c) void {
+        return c.eglGetProcAddress;
     }
 
     pub fn updateSurface(self: *EglContext, gbm_surface: ?*c.gbm_surface) !void {

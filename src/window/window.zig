@@ -8,6 +8,9 @@ const c = @cImport({
     @cInclude("xkbcommon/xkbcommon.h");
 });
 
+// Re-export for library consumers
+pub const ExpansionAlloc = sphtud.util.ExpansionAlloc;
+
 const BoundInterfaces = struct {
     compositor: wlb.WlCompositor,
     xdg_wm_base: wlb.XdgWmBase,
@@ -110,25 +113,32 @@ fn resolveDriHandleFromDevt(alloc: std.mem.Allocator, val_opt: ?u64) ![:0]const 
 pub const DefaultGlContext = struct {
     egl_ctx: system.EglContext,
     gbm_ctx: system.GbmContext,
-    compositor_owned_buffers: std.AutoHashMap(u32, system.GbmContext.Buffer),
+    // Octable buffering would be crazy
+    compositor_owned_buffers_buf: [8]CompBuf,
+    compositor_owned_buffers: std.ArrayList(CompBuf),
 
-    pub fn init(alloc: std.mem.Allocator, initial_width: u32, initial_height: u32, device: [:0]const u8) !DefaultGlContext {
+    const CompBuf = struct {
+        wl_buf_id: u32,
+        buf: system.GbmContext.Buffer,
+    };
+
+    pub fn initPinned(self: *DefaultGlContext, initial_width: u32, initial_height: u32, device: [:0]const u8) !void {
         var gbm_ctx = try system.GbmContext.init(initial_width, initial_height, device);
         errdefer gbm_ctx.deinit();
 
-        const egl_ctx = try system.EglContext.init(alloc, gbm_ctx);
+        const egl_ctx = try system.EglContext.init(gbm_ctx);
 
-        return .{
+        self.* = .{
             .egl_ctx = egl_ctx,
             .gbm_ctx = gbm_ctx,
-            .compositor_owned_buffers = .init(alloc),
+            .compositor_owned_buffers_buf = undefined,
+            .compositor_owned_buffers = .initBuffer(&self.compositor_owned_buffers_buf),
         };
     }
 
     pub fn deinit(self: *DefaultGlContext) void {
         self.egl_ctx.deinit();
         self.gbm_ctx.deinit();
-        self.compositor_owned_buffers.deinit();
     }
 
     pub const Size = struct {
@@ -141,6 +151,10 @@ pub const DefaultGlContext = struct {
             .width = try self.egl_ctx.getWidth(),
             .height = try self.egl_ctx.getHeight(),
         };
+    }
+
+    pub fn loaderProc(self: *DefaultGlContext) *const fn ([*c]const u8) callconv(.c) ?*const fn () callconv(.c) void {
+        return self.egl_ctx.loaderProc();
     }
 
     pub fn swapBuffers(self: *DefaultGlContext, window: *Window) !void {
@@ -156,16 +170,18 @@ pub const DefaultGlContext = struct {
         defer sphtud.io.close(buffer.fd);
 
         const wl_buf_id = try window.swapBuffers(buffer);
-        try self.compositor_owned_buffers.put(wl_buf_id, front_buf);
+        try self.compositor_owned_buffers.appendBounded(.{
+            .buf = front_buf,
+            .wl_buf_id = wl_buf_id,
+        });
     }
 
     pub fn notifyGlBufferRelease(self: *DefaultGlContext, buf_id: u32) void {
-        const gbm_handle = self.compositor_owned_buffers.fetchRemove(buf_id) orelse {
-            std.log.err("Got release event for unknown buffer", .{});
-            return;
-        };
+        const gbm_handle = blk: for (self.compositor_owned_buffers.items, 0..) |elem, i| {
+            if (elem.wl_buf_id == buf_id) break :blk self.compositor_owned_buffers.swapRemove(i).buf;
+        } else return;
 
-        self.gbm_ctx.unlock(gbm_handle.value);
+        self.gbm_ctx.unlock(gbm_handle);
     }
 
     pub fn requestResize(self: *DefaultGlContext, width: i32, height: i32) !void {
@@ -295,7 +311,7 @@ pub const Window = struct {
         time: u32,
     };
 
-    pub fn init(arena: std.mem.Allocator, expansion_alloc: sphtud.util.ExpansionAlloc, env: std.process.Environ) !Window {
+    pub fn init(arena: std.mem.Allocator, expansion_alloc: ExpansionAlloc, env: std.process.Environ) !Window {
         var client = try wlclient.Client(wlb).init(arena, expansion_alloc, env);
         errdefer client.deinit();
 
