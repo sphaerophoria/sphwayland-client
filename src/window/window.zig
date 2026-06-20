@@ -8,6 +8,9 @@ const c = @cImport({
     @cInclude("xkbcommon/xkbcommon.h");
 });
 
+// Re-export for library consumers
+pub const ExpansionAlloc = sphtud.util.ExpansionAlloc;
+
 const BoundInterfaces = struct {
     compositor: wlb.WlCompositor,
     xdg_wm_base: wlb.XdgWmBase,
@@ -141,6 +144,10 @@ pub const DefaultGlContext = struct {
             .width = try self.egl_ctx.getWidth(),
             .height = try self.egl_ctx.getHeight(),
         };
+    }
+
+    pub fn procLoader(self: *DefaultGlContext) *const fn ([*c]const u8) callconv(.c) ?*const fn () callconv(.c) void {
+        return self.egl_ctx.loaderProc();
     }
 
     pub fn swapBuffers(self: *DefaultGlContext, window: *Window) !void {
@@ -295,7 +302,7 @@ pub const Window = struct {
         time: u32,
     };
 
-    pub fn init(arena: std.mem.Allocator, expansion_alloc: sphtud.util.ExpansionAlloc, env: std.process.Environ) !Window {
+    pub fn init(arena: std.mem.Allocator, expansion_alloc: ExpansionAlloc, env: std.process.Environ) !Window {
         var client = try wlclient.Client(wlb).init(arena, expansion_alloc, env);
         errdefer client.deinit();
 

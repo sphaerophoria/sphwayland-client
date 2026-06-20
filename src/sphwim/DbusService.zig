@@ -106,6 +106,9 @@ fn serviceInner(self: *DbusService) !void {
                                                     &bs,
                                                 );
                                             },
+                                            .BringToFront => |args| {
+                                                self.state.moveToFront(.fromIdx(args.id));
+                                            },
                                         }
                                     },
                                     .get_property => return error.InvalidCall,

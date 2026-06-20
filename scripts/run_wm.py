@@ -37,8 +37,8 @@ def main():
         subprocess.Popen(["./zig-out/bin/sphwayland-client"], stdout=f, stderr=f)
 
     with Path("client2.log").open("w") as f:
-        # subprocess.Popen(["./zig-out/bin/sphwayland-client"], stdout=f, stderr=f)
-        subprocess.Popen(["./sphtud/zig-out/bin/gui_example"], stdout=f, stderr=f)
+        subprocess.Popen(["./zig-out/bin/sphwayland-client"], stdout=f, stderr=f)
+        # subprocess.Popen(["./sphtud/zig-out/bin/gui_example"], stdout=f, stderr=f)
 
 
 if __name__ == "__main__":

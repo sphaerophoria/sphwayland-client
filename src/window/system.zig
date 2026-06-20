@@ -184,6 +184,10 @@ pub const EglContext = struct {
         return surface;
     }
 
+    pub fn loaderProc(_: *const EglContext) *const fn ([*c]const u8) callconv(.c) ?*const fn () callconv(.c) void {
+        return c.eglGetProcAddress;
+    }
+
     pub fn updateSurface(self: *EglContext, gbm_surface: ?*c.gbm_surface) !void {
         const surface = try makeEglSurface(self.display, self.config, gbm_surface);
 
