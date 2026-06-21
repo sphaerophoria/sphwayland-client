@@ -294,8 +294,8 @@ pub const Window = struct {
     const InputEvent = union(enum) {
         pointer_movement: PointerPos,
         key: Key,
-        mouse1_down,
-        mouse1_up,
+        mouse1_down: u32, // time
+        mouse1_up: u32, // time
     };
 
     const FormatTableItem = packed struct {
@@ -620,8 +620,8 @@ pub const Window = struct {
                 .button => |params| {
                     if (params.button == c.BTN_LEFT) {
                         const input_event: InputEvent = switch (params.state) {
-                            0 => InputEvent.mouse1_up,
-                            1 => InputEvent.mouse1_down,
+                            0 => InputEvent{ .mouse1_up = params.time },
+                            1 => InputEvent{ .mouse1_down = params.time },
                             else => unreachable,
                         };
                         try self.pending_input_events.append(self.alloc, input_event);

@@ -9,6 +9,9 @@ const FdPool = @import("../FdPool.zig");
 const system_gl = @import("../system_gl.zig");
 const server = @import("../wayland.zig");
 const wl_cmsg = @import("wl_cmsg");
+const c = @cImport({
+    @cInclude("linux/input-event-codes.h");
+});
 
 const Connection = @This();
 
@@ -200,15 +203,61 @@ pub fn notifyCursorPosition(self: *Connection, surface_id: WlSurfaceId, x: i32, 
             });
         }
 
-        const interface_version = self.interface_registry.get(interface.id).?.version;
-
-        if (interface_version >= Bindings.WlPointer.FrameParams.min_version) {
-            try interface.frame(self.io_writer, .{});
-        }
+        try self.pointerFrame(interface);
     }
 
     self.pointer.current_surface = surface_id;
     try self.io_writer.flush();
+}
+
+pub fn notifyMouseDown(self: *Connection, surface_id: WlSurfaceId, time: u32) !void {
+    var pointer_it = self.wl_pointers.iter();
+    while (pointer_it.next()) |item| {
+        if (!self.pointer.isInSurface(surface_id)) continue;
+
+        var interface = Bindings.WlPointer{ .id = item.key.inner };
+        const ButtonState = Bindings.WlPointer.Enums.ButtonState;
+        try interface.button(self.io_writer, .{
+            .serial = self.incSerial(),
+            .button = c.BTN_LEFT,
+            .time = time,
+            .state = ButtonState.pressed,
+        });
+
+        try self.pointerFrame(interface);
+    }
+
+    self.pointer.down = true;
+    try self.io_writer.flush();
+}
+
+pub fn notifyMouseUp(self: *Connection, time: u32) !void {
+    if (!self.pointer.down) return;
+
+    var pointer_it = self.wl_pointers.iter();
+    while (pointer_it.next()) |item| {
+        var interface = Bindings.WlPointer{ .id = item.key.inner };
+        const ButtonState = Bindings.WlPointer.Enums.ButtonState;
+        try interface.button(self.io_writer, .{
+            .serial = self.incSerial(),
+            .button = c.BTN_LEFT,
+            .time = time,
+            .state = ButtonState.released,
+        });
+
+        try self.pointerFrame(interface);
+    }
+    self.pointer.down = false;
+
+    try self.io_writer.flush();
+}
+
+fn pointerFrame(self: *Connection, interface: Bindings.WlPointer) !void {
+    const interface_version = self.interface_registry.get(interface.id).?.version;
+
+    if (interface_version >= Bindings.WlPointer.FrameParams.min_version) {
+        try interface.frame(self.io_writer, .{});
+    }
 }
 
 pub fn updateRenderableHandle(self: *Connection, surface: WlSurfaceId, handle: CompositorState.Windows.Handle) void {
@@ -1115,6 +1164,7 @@ const Surface = struct {
 
 const Pointer = struct {
     current_surface: ?WlSurfaceId = null,
+    down: bool = false,
 
     fn isInSurface(self: Pointer, surface: WlSurfaceId) bool {
         const current_surface = self.current_surface orelse return false;

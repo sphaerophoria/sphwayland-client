@@ -84,13 +84,14 @@ pub fn service(self: *LibInputInputBackend, compositor_state: *CompositorState) 
 
                 const button = system.libinput_event_pointer_get_button(pointer_event);
                 const state = system.libinput_event_pointer_get_button_state(pointer_event);
+                const time = system.libinput_event_pointer_get_time(pointer_event);
 
                 switch (buttonWithState(button, state)) {
                     buttonWithState(system.BTN_LEFT, system.LIBINPUT_BUTTON_STATE_PRESSED) => {
-                        try compositor_state.notifyMouse1Down();
+                        try compositor_state.notifyMouse1Down(time);
                     },
                     buttonWithState(system.BTN_LEFT, system.LIBINPUT_BUTTON_STATE_RELEASED) => {
-                        compositor_state.notifyMouse1Up();
+                        try compositor_state.notifyMouse1Up(time);
                     },
                     else => {
                         input_logger.debug("unused button event 0x{x} {d}", .{ button, state });

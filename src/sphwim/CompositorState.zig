@@ -33,6 +33,7 @@ const DragState = union(enum) {
         },
         anchor_pos: i32,
     },
+    surface: Windows.Handle,
     none,
 
     fn resolveWindowHandle(self: *DragState, params: anytype, windows: *const Windows) ?Windows.UnstableHandle {
@@ -113,6 +114,14 @@ pub fn notifyCursorPosition(self: *CompositorState, x: f32, y: f32, time: u32) !
 
             try si.connection.requestResize(si.surface, @intFromFloat(new_width), @intFromFloat(new_height));
         },
+        .surface => |handle| {
+            const u = self.windows.toUnstable(handle) orelse return;
+            const pos = self.windows.items(.position).get(u);
+            const source_info = self.windows.items(.source_info).get(u);
+            const x_i: i32 = @intFromFloat(x);
+            const y_i: i32 = @intFromFloat(y);
+            try source_info.connection.notifyCursorPosition(source_info.surface, x_i - pos.left, y_i - pos.top, time);
+        },
         .none => {
             if (self.findHoveredWindow()) |hovered| {
                 switch (hovered.location) {
@@ -166,6 +175,11 @@ pub fn removeWindow(self: *CompositorState, handle: Windows.Handle) void {
                 self.drag_state = .none;
             }
         },
+        .surface => |id| {
+            if (id.inner == handle.inner) {
+                self.drag_state = .none;
+            }
+        },
         .none => {},
     }
 
@@ -194,7 +208,7 @@ fn pinDragAnchor(self: *CompositorState, handle: Windows.UnstableHandle, new_buf
 
     const resize_params = switch (self.drag_state) {
         .resize => |r| r,
-        .none, .moving_window => return,
+        .surface, .none, .moving_window => return,
     };
 
     const resize_unstable = self.windows.toUnstable(resize_params.id) orelse return;
@@ -211,7 +225,16 @@ fn pinDragAnchor(self: *CompositorState, handle: Windows.UnstableHandle, new_buf
     }
 }
 
-pub fn notifyMouse1Up(self: *CompositorState) void {
+pub fn notifyMouse1Up(self: *CompositorState, time: u32) !void {
+    switch (self.drag_state) {
+        .surface => |id| blk: {
+            const uh = self.windows.toUnstable(id) orelse break :blk;
+            const source_info = self.windows.items(.source_info).get(uh);
+            try source_info.connection.notifyMouseUp(time);
+        },
+        .none, .moving_window, .resize => {},
+    }
+
     self.drag_state = .none;
 }
 
@@ -250,7 +273,7 @@ fn findHoveredWindow(self: *CompositorState) ?WindowFgResult {
     return null;
 }
 
-pub fn notifyMouse1Down(self: *CompositorState) !void {
+pub fn notifyMouse1Down(self: *CompositorState, time: u32) !void {
     const res = (self.findHoveredWindow()) orelse return;
     switch (res.location) {
         .titlebar => {
@@ -305,7 +328,11 @@ pub fn notifyMouse1Down(self: *CompositorState) !void {
             const source_info = self.windows.items(.source_info).get(res.unstable);
             try source_info.connection.closeWindow(source_info.window);
         },
-        .surface => {},
+        .surface => {
+            const source_info = self.windows.items(.source_info).get(res.unstable);
+            try source_info.connection.notifyMouseDown(source_info.surface, time);
+            self.drag_state = .{ .surface = res.stable };
+        },
     }
 
     self.moveToFrontUnstable(res.unstable);
