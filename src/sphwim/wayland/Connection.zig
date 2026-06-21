@@ -33,7 +33,8 @@ gbm_context: *const system_gl.GbmContext,
 interface_registry: InterfaceRegistry,
 wl_surfaces: sphtud.util.AutoHashMap(WlSurfaceId, Surface),
 wl_buffers: sphtud.util.AutoHashMap(WlBufferId, *RefCountedRenderBuffer),
-wl_pointers: sphtud.util.AutoHashMap(WlPointerId, Pointer),
+wl_pointers: sphtud.util.AutoHashMap(WlPointerId, void),
+pointer: Pointer,
 zwp_params: sphtud.util.AutoHashMap(ZwpBufferParamsId, ?BufferParams),
 xdg_surfaces: sphtud.util.AutoHashMap(XdgSurfaceId, WlSurfaceId),
 windows: sphtud.util.AutoHashMap(XdgToplevelId, Window),
@@ -93,6 +94,7 @@ pub fn init(
         .io_reader = io_reader,
         .compositor_state = compositor_state,
         .gbm_context = gbm_context,
+        .pointer = .{},
         .interface_registry = try .init(alloc),
         .wl_surfaces = try .init(alloc.arena(), alloc.expansion(), typical_surfaces, max_surfaces),
         .wl_pointers = try .init(alloc.arena(), alloc.expansion(), typical_pointers, max_pointers),
@@ -176,14 +178,14 @@ pub fn notifyCursorPosition(self: *Connection, surface_id: WlSurfaceId, x: i32, 
     var pointer_it = self.wl_pointers.iter();
     while (pointer_it.next()) |item| {
         var interface = Bindings.WlPointer{ .id = item.key.inner };
-        if (item.val.isInSurface(surface_id)) {
+        if (self.pointer.isInSurface(surface_id)) {
             try interface.motion(self.io_writer, .{
                 .time = time,
                 .surface_x = wlio.WlFixed.fromi32(x),
                 .surface_y = wlio.WlFixed.fromi32(y),
             });
         } else {
-            if (item.val.current_surface) |to_leave| {
+            if (self.pointer.current_surface) |to_leave| {
                 try interface.leave(self.io_writer, .{
                     .serial = leave_serial,
                     .surface = to_leave.inner,
@@ -196,7 +198,6 @@ pub fn notifyCursorPosition(self: *Connection, surface_id: WlSurfaceId, x: i32, 
                 .surface_x = wlio.WlFixed.fromi32(x),
                 .surface_y = wlio.WlFixed.fromi32(y),
             });
-            item.val.current_surface = surface_id;
         }
 
         const interface_version = self.interface_registry.get(interface.id).?.version;
@@ -205,6 +206,8 @@ pub fn notifyCursorPosition(self: *Connection, surface_id: WlSurfaceId, x: i32, 
             try interface.frame(self.io_writer, .{});
         }
     }
+
+    self.pointer.current_surface = surface_id;
     try self.io_writer.flush();
 }
 
@@ -531,7 +534,7 @@ fn handleMessage(self: *Connection, object_id: u32, req: Bindings.WaylandIncomin
         .wl_seat => |parsed| switch (parsed) {
             .get_pointer => |params| {
                 const pointer_id = WlPointerId{ .inner = params.id };
-                try self.wl_pointers.put(pointer_id, .{});
+                try self.wl_pointers.put(pointer_id, {});
                 try self.interface_registry.put(params.id, .wl_pointer, version, diagnostics);
             },
             else => logUnhandledRequest(object_id, req),
