@@ -114,7 +114,7 @@ pub fn notifyCursorPosition(self: *CompositorState, x: f32, y: f32, time: u32) !
             try si.connection.requestResize(si.surface, @intFromFloat(new_width), @intFromFloat(new_height));
         },
         .none => {
-            if (try self.findHoveredWindow()) |hovered| {
+            if (self.findHoveredWindow()) |hovered| {
                 switch (hovered.location) {
                     .surface => |pos| {
                         const source_info = self.windows.items(.source_info).get(hovered.unstable);
@@ -230,7 +230,7 @@ fn moveToFrontUnstable(self: *CompositorState, handle: Windows.UnstableHandle) v
     self.windows.moveToEnd(handle);
 }
 
-fn findHoveredWindow(self: *CompositorState) !?WindowFgResult {
+fn findHoveredWindow(self: *CompositorState) ?WindowFgResult {
     var it = self.windows.iter();
     while (it.next()) {
         const window = it.get();
@@ -251,7 +251,7 @@ fn findHoveredWindow(self: *CompositorState) !?WindowFgResult {
 }
 
 pub fn notifyMouse1Down(self: *CompositorState) !void {
-    const res = (try self.findHoveredWindow()) orelse return;
+    const res = (self.findHoveredWindow()) orelse return;
     switch (res.location) {
         .titlebar => {
             self.drag_state = .{
