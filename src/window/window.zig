@@ -10,6 +10,7 @@ const c = @cImport({
 
 // Re-export for library consumers
 pub const ExpansionAlloc = sphtud.util.ExpansionAlloc;
+pub const KeySym = sphtud.window_events.Key;
 
 const BoundInterfaces = struct {
     compositor: wlb.WlCompositor,
@@ -224,6 +225,14 @@ pub const RenderBuffer = struct {
     }
 };
 
+fn scancodeToKeycode(scancode: u32) u32 {
+    // The simple answer here is that the libxkbcommon docs and the wayland
+    // protocol docs both say to do this
+    //
+    // The longer explanation is at https://youtu.be/2iJlbg0IuSE
+    return scancode + 8;
+}
+
 pub const Key = struct {
     scancode: u32,
     state: State,
@@ -233,16 +242,31 @@ pub const Key = struct {
         pressed = wlb.WlKeyboard.Enums.KeyState.pressed,
     };
 
+    pub fn toSym(self: Key, window: *const Window) !?KeySym {
+        const code = scancodeToKeycode(self.scancode);
+
+        const keymap = window.keymap orelse return error.NoKeymap;
+        const xkb_sym = c.xkb_state_key_get_one_sym(keymap.state, code);
+
+        switch (xkb_sym) {
+            c.XKB_KEY_space...c.XKB_KEY_asciitilde => return .{ .ascii = @intCast(xkb_sym) },
+            c.XKB_KEY_Left => return .left_arrow,
+            c.XKB_KEY_Right => return .right_arrow,
+            c.XKB_KEY_BackSpace => return .backspace,
+            c.XKB_KEY_Delete => return .delete,
+            c.XKB_KEY_Escape => return .escape,
+            c.XKB_KEY_Home => return .home,
+            c.XKB_KEY_End => return .end,
+            else => return null,
+        }
+    }
+
     pub fn toUtf8(self: Key, buf: *[5]u8, window: *const Window) ![]const u8 {
-        // The simple answer here is that the libxkbcommon docs and the wayland
-        // protocol docs both say to do this
-        //
-        // The longer explanation is at https://youtu.be/2iJlbg0IuSE
-        const keycode = self.scancode + 8;
+        const code = scancodeToKeycode(self.scancode);
 
         const keymap = window.keymap orelse return error.NoKeymap;
 
-        const len = c.xkb_state_key_get_utf8(keymap.state, keycode, buf, buf.len);
+        const len = c.xkb_state_key_get_utf8(keymap.state, code, buf, buf.len);
         return buf[0..@intCast(len)];
     }
 };
@@ -669,6 +693,19 @@ pub const Window = struct {
                             .keymap = keymap,
                             .state = state,
                         };
+                    }
+                },
+                .modifiers => |params| {
+                    if (self.keymap) |*km| {
+                        _ = c.xkb_state_update_mask(
+                            km.state,
+                            params.mods_depressed,
+                            params.mods_latched,
+                            params.mods_locked,
+                            0,
+                            0,
+                            0,
+                        );
                     }
                 },
                 .key => |params| {

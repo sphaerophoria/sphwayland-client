@@ -61,7 +61,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 .key => |k| {
                     var utf8_buf: [5]u8 = undefined;
                     const s = try k.toUtf8(&utf8_buf, &window);
-                    std.debug.print("Got key: {s} ({d}) {t}\n", .{ s, k.scancode, k.state });
+                    std.debug.print("Got key: {s} ({d}) ({any}), {t}\n", .{ s, k.scancode, try k.toSym(&window), k.state });
                 },
             }
         }
